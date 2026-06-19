@@ -1,0 +1,11 @@
+{
+  "name": "save-tags-with-images",
+  "version": "0.1.0",
+  "description": "用图片保存tag：A local ComfyUI image metadata and tag reference gallery.",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "start": "node server.mjs",
+    "dev": "node server.mjs"
+  }
+}
