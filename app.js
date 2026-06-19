@@ -14,6 +14,7 @@ const state = {
   view: localStorage.getItem("galleryView") || "comfort",
   directoryHandle: null,
   isDirectorySyncing: false,
+  isLibraryMutating: false,
   objectUrls: new Map(),
   isDraggingCard: false,
   blockCardDrag: false,
@@ -72,6 +73,30 @@ function loadCustomCategories() {
 function saveCustomCategories() {
   state.customCategories = [...new Set(state.customCategories.map(normalizeCategoryLabel).filter(Boolean))].sort((a, b) => a.localeCompare(b));
   localStorage.setItem("customCategories", JSON.stringify(state.customCategories));
+}
+
+function blockLibraryMutation(action) {
+  if (!state.isDirectorySyncing) return false;
+  showToast(`正在同步本地目录，请稍后再${action}`);
+  return true;
+}
+
+function beginLibraryMutation(action) {
+  if (blockLibraryMutation(action)) return false;
+  if (state.isLibraryMutating) {
+    showToast("正在处理本地库，请稍后再试");
+    return false;
+  }
+  state.isLibraryMutating = true;
+  return true;
+}
+
+function endLibraryMutation() {
+  state.isLibraryMutating = false;
+}
+
+function showDirectorySyncFailure(context = "目录同步") {
+  showToast(`${context}失败，IndexedDB 数据已保留。目录可能已有部分文件，请重试同步。`);
 }
 
 async function init() {
@@ -176,24 +201,45 @@ function bindEvents() {
   });
 }
 
-function createCategoryFromPrompt() {
-  const rawName = window.prompt("新建分类标签：");
-  if (rawName === null) return;
+async function createCategoryFromPrompt() {
+  if (!beginLibraryMutation("新建分类")) return;
 
-  const categoryName = normalizeCategoryLabel(rawName);
-  if (!categoryName) {
-    showToast("分类标签不能为空");
-    return;
+  try {
+    const rawName = window.prompt("新建分类标签：");
+    if (rawName === null) return;
+
+    const categoryName = normalizeCategoryLabel(rawName);
+    if (!categoryName) {
+      showToast("分类标签不能为空");
+      return;
+    }
+
+    let categoryAdded = false;
+    if (!state.customCategories.some((category) => category.toLowerCase() === categoryName.toLowerCase())) {
+      state.customCategories.push(categoryName);
+      saveCustomCategories();
+      categoryAdded = true;
+    }
+
+    let directoryFailed = false;
+    if (state.directoryHandle && categoryAdded) {
+      try {
+        await writeDirectoryIndex();
+      } catch (error) {
+        directoryFailed = true;
+        console.error(error);
+        showToast("目录索引同步失败，分类已保存在本机。请确认目录可写后重新选择同一目录重试同步。");
+      }
+    }
+
+    state.activeSection = categoryName;
+    render();
+    if (!directoryFailed) {
+      showToast(`已新建分类：${categoryName}`);
+    }
+  } finally {
+    endLibraryMutation();
   }
-
-  if (!state.customCategories.some((category) => category.toLowerCase() === categoryName.toLowerCase())) {
-    state.customCategories.push(categoryName);
-    saveCustomCategories();
-  }
-
-  state.activeSection = categoryName;
-  render();
-  showToast(`已新建分类：${categoryName}`);
 }
 
 function openDatabase() {
@@ -252,80 +298,102 @@ async function clearEntries() {
 }
 
 async function importFiles(files) {
+  if (!beginLibraryMutation("导入图片")) return;
+
   const imageFiles = files.filter(isSupportedImageFile);
   if (!imageFiles.length) {
     showToast("没有找到可导入的图片");
+    endLibraryMutation();
     return;
   }
 
-  let imported = 0;
-  let updated = 0;
-  const entriesById = new Map(state.entries.map((entry) => [entry.id, entry]));
+  try {
+    let imported = 0;
+    let updated = 0;
+    let directoryFailed = false;
+    const entriesById = new Map(state.entries.map((entry) => [entry.id, entry]));
 
-  for (const file of imageFiles) {
-    try {
-      const buffer = await file.arrayBuffer();
-      const metadata = await readImageMetadata(file, buffer);
-      const imageInfo = await readImageSize(file);
-      const tags = buildTags(metadata);
-      const savedTags = pickInitialSavedTags(tags);
-      const id = await hashFile(buffer, file.name, file.lastModified);
-      const existingEntry = entriesById.get(id);
-      const preserveEditedTags = hasCustomSavedTags(existingEntry);
-      const importedAt = new Date().toISOString();
-      const sourceModifiedAt = file.lastModified ? new Date(file.lastModified).toISOString() : importedAt;
-      const displayName = existingEntry ? getStoredDisplayName(existingEntry) : formatEntryTime(sourceModifiedAt);
-      const entry = {
-        id,
-        parserVersion: PARSER_VERSION,
-        name: file.name,
-        displayName,
-        displayNameEdited: Boolean(existingEntry?.displayNameEdited && displayName),
-        type: file.type || guessMimeType(file.name),
-        size: file.size,
-        width: imageInfo.width,
-        height: imageInfo.height,
-        createdAt: existingEntry?.createdAt || Date.now(),
-        importedAt: existingEntry?.importedAt || importedAt,
-        sourceModifiedAt,
-        note: existingEntry?.note || "",
-        section: "",
-        categories: existingEntry ? getEntryCategories(existingEntry) : [],
-        tags,
-        savedTags: preserveEditedTags ? existingEntry.savedTags : savedTags,
-        savedTagsEdited: preserveEditedTags,
-        positivePrompt: metadata.positivePrompt,
-        negativePrompt: metadata.negativePrompt,
-        modelTags: metadata.modelTags,
-        samplerTags: metadata.samplerTags,
-        rawMetadata: metadata.raw,
-        imageBuffer: buffer,
-      };
+    for (const file of imageFiles) {
+      try {
+        const buffer = await file.arrayBuffer();
+        const metadata = await readImageMetadata(file, buffer);
+        const imageInfo = await readImageSize(file);
+        const tags = buildTags(metadata);
+        const savedTags = pickInitialSavedTags(tags);
+        const id = await hashFile(buffer, file.name, file.lastModified);
+        const existingEntry = entriesById.get(id);
+        const preserveEditedTags = hasCustomSavedTags(existingEntry);
+        const importedAt = new Date().toISOString();
+        const sourceModifiedAt = file.lastModified ? new Date(file.lastModified).toISOString() : importedAt;
+        const displayName = existingEntry ? getStoredDisplayName(existingEntry) : formatEntryTime(sourceModifiedAt);
+        const entry = {
+          id,
+          parserVersion: PARSER_VERSION,
+          name: file.name,
+          displayName,
+          displayNameEdited: Boolean(existingEntry?.displayNameEdited && displayName),
+          type: file.type || guessMimeType(file.name),
+          size: file.size,
+          width: imageInfo.width,
+          height: imageInfo.height,
+          createdAt: existingEntry?.createdAt || Date.now(),
+          importedAt: existingEntry?.importedAt || importedAt,
+          sourceModifiedAt,
+          note: existingEntry?.note || "",
+          section: "",
+          categories: existingEntry ? getEntryCategories(existingEntry) : [],
+          tags,
+          savedTags: preserveEditedTags ? existingEntry.savedTags : savedTags,
+          savedTagsEdited: preserveEditedTags,
+          positivePrompt: metadata.positivePrompt,
+          negativePrompt: metadata.negativePrompt,
+          modelTags: metadata.modelTags,
+          samplerTags: metadata.samplerTags,
+          rawMetadata: metadata.raw,
+          imageBuffer: buffer,
+        };
 
-      if (existingEntry) {
-        clearObjectUrl(id);
-        updated += 1;
-      } else {
-        imported += 1;
+        if (existingEntry) {
+          clearObjectUrl(id);
+          updated += 1;
+        } else {
+          imported += 1;
+        }
+        await saveEntry(entry);
+        try {
+          await syncEntryToDirectory(entry);
+          if (existingEntry && getDirectoryImageFileName(existingEntry) !== getDirectoryImageFileName(entry)) {
+            await deleteEntryImageFromDirectory(existingEntry);
+          }
+        } catch (error) {
+          directoryFailed = true;
+          console.error(error);
+        }
+        entriesById.set(id, entry);
+      } catch (error) {
+        console.error(error);
+        showToast(`${file.name} 导入失败：${error.message || "无法读取"}`);
       }
-      await saveEntry(entry);
-      await syncEntryToDirectory(entry);
-      if (existingEntry && getDirectoryImageFileName(existingEntry) !== getDirectoryImageFileName(entry)) {
-        await deleteEntryImageFromDirectory(existingEntry);
-      }
-      entriesById.set(id, entry);
-    } catch (error) {
-      console.error(error);
-      showToast(`${file.name} 导入失败：${error.message || "无法读取"}`);
     }
-  }
 
-  await loadEntries();
-  render();
-  if (state.directoryHandle) {
-    await writeDirectoryIndex();
+    await loadEntries();
+    render();
+    if (state.directoryHandle && !directoryFailed) {
+      try {
+        await writeDirectoryIndex();
+      } catch (error) {
+        directoryFailed = true;
+        console.error(error);
+      }
+    }
+    if (directoryFailed) {
+      showDirectorySyncFailure("目录同步");
+    } else {
+      showToast(`已导入 ${imported} 张图片${updated ? `，更新 ${updated} 张` : ""}`);
+    }
+  } finally {
+    endLibraryMutation();
   }
-  showToast(`已导入 ${imported} 张图片${updated ? `，更新 ${updated} 张` : ""}`);
 }
 
 async function migrateEntry(entry) {
@@ -1301,6 +1369,7 @@ async function handleDialogAction(event) {
 
   const deleteButton = event.target.closest("[data-delete-detail-id]");
   if (deleteButton) {
+    if (blockLibraryMutation("删除图片")) return;
     const confirmed = window.confirm("确定删除这张 tag 参考图？");
     if (!confirmed) return;
     elements.detailDialog.close();
@@ -1322,35 +1391,53 @@ async function handleDialogKeydown(event) {
 }
 
 async function saveEditedTags(id) {
+  if (!beginLibraryMutation("保存详情")) return;
+
   const entry = state.entries.find((item) => item.id === id);
   const input = document.querySelector("#savedTagsInput");
   const nameInput = document.querySelector("#displayNameInput");
   const categoryInput = document.querySelector("#categoryInput");
   const noteInput = document.querySelector("#noteInput");
-  if (!entry || !input) return;
+  if (!entry || !input) {
+    endLibraryMutation();
+    return;
+  }
 
-  entry.savedTags = parseSavedTags(input.value);
-  entry.savedTagsEdited = true;
-  const nextDisplayName = normalizeDisplayName(nameInput?.value || "");
-  entry.displayName = nextDisplayName;
-  entry.displayNameEdited = Boolean(nextDisplayName);
-  entry.categories = parseCategoryLabels(categoryInput?.value || "");
-  entry.section = "";
-  for (const category of entry.categories) {
-    if (!state.customCategories.some((item) => item.toLowerCase() === category.toLowerCase())) {
-      state.customCategories.push(category);
+  try {
+    let directoryFailed = false;
+    entry.savedTags = parseSavedTags(input.value);
+    entry.savedTagsEdited = true;
+    const nextDisplayName = normalizeDisplayName(nameInput?.value || "");
+    entry.displayName = nextDisplayName;
+    entry.displayNameEdited = Boolean(nextDisplayName);
+    entry.categories = parseCategoryLabels(categoryInput?.value || "");
+    entry.section = "";
+    for (const category of entry.categories) {
+      if (!state.customCategories.some((item) => item.toLowerCase() === category.toLowerCase())) {
+        state.customCategories.push(category);
+      }
     }
+    saveCustomCategories();
+    entry.note = String(noteInput?.value || "").trim();
+    await saveEntry(entry);
+    await loadEntries();
+    render();
+    if (state.directoryHandle) {
+      try {
+        await writeDirectoryIndex();
+      } catch (error) {
+        directoryFailed = true;
+        console.error(error);
+        showDirectorySyncFailure("目录索引同步");
+      }
+    }
+    openDetail(id);
+    if (!directoryFailed) {
+      showToast("卡片信息已保存");
+    }
+  } finally {
+    endLibraryMutation();
   }
-  saveCustomCategories();
-  entry.note = String(noteInput?.value || "").trim();
-  await saveEntry(entry);
-  await loadEntries();
-  render();
-  if (state.directoryHandle) {
-    await writeDirectoryIndex();
-  }
-  openDetail(id);
-  showToast("卡片信息已保存");
 }
 
 async function copySavedTags(id) {
@@ -1391,10 +1478,16 @@ function downloadOriginalImage(id) {
 }
 
 async function refreshSavedTagsFromMetadata(id) {
+  if (!beginLibraryMutation("重读元数据")) return;
+
   const entry = state.entries.find((item) => item.id === id);
-  if (!entry) return;
+  if (!entry) {
+    endLibraryMutation();
+    return;
+  }
 
   try {
+    let directoryFailed = false;
     const metadata = await readImageMetadata({ name: entry.name, type: entry.type }, entry.imageBuffer);
     const tags = buildTags(metadata);
     entry.parserVersion = PARSER_VERSION;
@@ -1411,13 +1504,23 @@ async function refreshSavedTagsFromMetadata(id) {
     await loadEntries();
     render();
     if (state.directoryHandle) {
-      await writeDirectoryIndex();
+      try {
+        await writeDirectoryIndex();
+      } catch (error) {
+        directoryFailed = true;
+        console.error(error);
+        showDirectorySyncFailure("目录索引同步");
+      }
     }
     openDetail(id);
-    showToast("已从图片元数据重新生成 tag");
+    if (!directoryFailed) {
+      showToast("已从图片元数据重新生成 tag");
+    }
   } catch (error) {
     console.error(error);
     showToast("重新生成失败，图片元数据可能已损坏");
+  } finally {
+    endLibraryMutation();
   }
 }
 
@@ -1716,6 +1819,11 @@ async function pickDirectory() {
     return;
   }
 
+  if (state.isLibraryMutating) {
+    showToast("正在处理本地库，请稍后再连接目录");
+    return;
+  }
+
   try {
     const nextDirectoryHandle = await window.showDirectoryPicker({ mode: "readwrite" });
     await migrateLibraryToDirectory(nextDirectoryHandle);
@@ -1729,14 +1837,15 @@ async function pickDirectory() {
 
 async function migrateLibraryToDirectory(directoryHandle) {
   const previousStatus = state.directoryHandle ? "目录同步" : "IndexedDB";
-  const total = state.entries.length;
+  const snapshot = createDirectorySyncSnapshot();
+  const total = snapshot.entries.length;
 
   state.isDirectorySyncing = true;
   elements.pickFolderButton.disabled = true;
   elements.storageStatus.textContent = total ? `迁移 0/${total}` : "目录同步";
 
   try {
-    const result = await syncAllToDirectory(directoryHandle, (synced, count) => {
+    const result = await syncAllToDirectory(directoryHandle, snapshot, (synced, count) => {
       elements.storageStatus.textContent = `迁移 ${synced}/${count}`;
     });
     state.directoryHandle = directoryHandle;
@@ -1745,24 +1854,24 @@ async function migrateLibraryToDirectory(directoryHandle) {
   } catch (error) {
     console.error(error);
     elements.storageStatus.textContent = previousStatus;
-    showToast("迁移到本地目录失败，请确认目录可写");
+    showDirectorySyncFailure("迁移到本地目录");
   } finally {
     state.isDirectorySyncing = false;
     elements.pickFolderButton.disabled = false;
   }
 }
 
-async function syncAllToDirectory(directoryHandle = state.directoryHandle, onProgress) {
+async function syncAllToDirectory(directoryHandle = state.directoryHandle, snapshot = createDirectorySyncSnapshot(), onProgress) {
   if (!directoryHandle) return { synced: 0 };
 
   let synced = 0;
-  const total = state.entries.length;
-  for (const entry of state.entries) {
+  const total = snapshot.entries.length;
+  for (const entry of snapshot.entries) {
     await syncEntryToDirectory(entry, directoryHandle);
     synced += 1;
     onProgress?.(synced, total);
   }
-  await writeDirectoryIndex(directoryHandle);
+  await writeDirectoryIndex(directoryHandle, snapshot.portableData);
 
   return { synced };
 }
@@ -1777,40 +1886,58 @@ async function syncEntryToDirectory(entry, directoryHandle = state.directoryHand
   await writable.close();
 }
 
-async function deleteEntryImageFromDirectory(entry) {
-  if (!state.directoryHandle || !entry) return;
+async function deleteEntryImageFromDirectory(entry, directoryHandle = state.directoryHandle, throwOnFailure = false) {
+  if (!directoryHandle || !entry) return;
   try {
-    const imageDir = await state.directoryHandle.getDirectoryHandle("images", { create: false });
+    const imageDir = await directoryHandle.getDirectoryHandle("images", { create: false });
     await imageDir.removeEntry(getDirectoryImageFileName(entry));
   } catch (error) {
-    if (error.name !== "NotFoundError") {
+    if (error.name === "NotFoundError") return;
+    if (throwOnFailure) {
+      throw error;
+    } else {
       console.warn("删除目录同步图片失败", entry.name, error);
     }
   }
 }
 
-async function deleteEntryImagesFromDirectory(entries) {
-  if (!state.directoryHandle) return;
-  await Promise.all(entries.map((entry) => deleteEntryImageFromDirectory(entry)));
+async function deleteEntryImagesFromDirectory(entries, directoryHandle = state.directoryHandle) {
+  let failed = false;
+  if (!directoryHandle) return failed;
+
+  for (const entry of entries) {
+    try {
+      await deleteEntryImageFromDirectory(entry, directoryHandle, true);
+    } catch (error) {
+      failed = true;
+      console.warn("删除目录同步图片失败", entry.name, error);
+    }
+  }
+
+  return failed;
 }
 
-async function writeDirectoryIndex(directoryHandle = state.directoryHandle) {
+async function writeDirectoryIndex(directoryHandle = state.directoryHandle, portableData = toPortableData()) {
   if (!directoryHandle) return;
   const fileHandle = await directoryHandle.getFileHandle(INDEX_FILE, { create: true });
   const writable = await fileHandle.createWritable();
-  await writable.write(JSON.stringify(toPortableData(), null, 2));
+  await writable.write(JSON.stringify(portableData, null, 2));
   await writable.close();
 }
 
 function toPortableData() {
+  return toPortableDataFromEntries(state.entries, state.customCategories);
+}
+
+function toPortableDataFromEntries(entries, categories) {
   return {
-    categories: state.customCategories,
-    images: toPortableIndex(),
+    categories,
+    images: toPortableIndex(entries),
   };
 }
 
-function toPortableIndex() {
-  return state.entries.map((entry) => ({
+function toPortableIndex(entries = state.entries) {
+  return entries.map((entry) => ({
     id: entry.id,
     name: entry.name,
     displayName: getEntryDisplayName(entry),
@@ -1833,6 +1960,15 @@ function toPortableIndex() {
     samplerTags: entry.samplerTags,
     rawMetadata: entry.rawMetadata,
   }));
+}
+
+function createDirectorySyncSnapshot() {
+  const entries = state.entries.map((entry) => ({ ...entry }));
+  const categories = [...state.customCategories];
+  return {
+    entries,
+    portableData: toPortableDataFromEntries(entries, categories),
+  };
 }
 
 function safeFileName(name) {
@@ -1871,33 +2007,71 @@ function exportIndex() {
 }
 
 async function clearLibrary() {
-  if (!state.entries.length) return;
-  const confirmed = window.confirm("确定清空浏览器本地保存的全部图片和标签？");
-  if (!confirmed) return;
+  if (!beginLibraryMutation("清空本地库")) return;
 
-  const entriesToDelete = [...state.entries];
-  clearObjectUrls();
-  await clearEntries();
-  await deleteEntryImagesFromDirectory(entriesToDelete);
-  state.entries = [];
-  render();
-  if (state.directoryHandle) {
-    await writeDirectoryIndex();
+  if (!state.entries.length) {
+    endLibraryMutation();
+    return;
   }
-  showToast("已清空本地库");
+  const confirmed = window.confirm("确定清空浏览器本地保存的全部图片和标签？");
+  if (!confirmed) {
+    endLibraryMutation();
+    return;
+  }
+
+  try {
+    const entriesToDelete = [...state.entries];
+    if (state.directoryHandle) {
+      await writeDirectoryIndex(state.directoryHandle, toPortableDataFromEntries([], state.customCategories));
+    }
+    clearObjectUrls();
+    await clearEntries();
+    state.entries = [];
+    render();
+    const directoryDeleteFailed = await deleteEntryImagesFromDirectory(entriesToDelete);
+    if (directoryDeleteFailed) {
+      showToast("已清空本地库，目录里可能留下未引用的旧图片。重新选择同一目录可重试同步。");
+    } else {
+      showToast("已清空本地库");
+    }
+  } catch (error) {
+    console.error(error);
+    showDirectorySyncFailure("清空目录同步数据");
+  } finally {
+    endLibraryMutation();
+  }
 }
 
 async function deleteEntry(id) {
+  if (!beginLibraryMutation("删除图片")) return;
+
   const entry = state.entries.find((item) => item.id === id);
-  clearObjectUrl(id);
-  await removeEntry(id);
-  await deleteEntryImageFromDirectory(entry);
-  state.entries = state.entries.filter((entry) => entry.id !== id);
-  render();
-  if (state.directoryHandle) {
-    await writeDirectoryIndex();
+  if (!entry) {
+    endLibraryMutation();
+    return;
   }
-  showToast("已删除卡片");
+
+  try {
+    const nextEntries = state.entries.filter((item) => item.id !== id);
+    if (state.directoryHandle) {
+      await writeDirectoryIndex(state.directoryHandle, toPortableDataFromEntries(nextEntries, state.customCategories));
+    }
+    clearObjectUrl(id);
+    await removeEntry(id);
+    state.entries = nextEntries;
+    render();
+    const directoryDeleteFailed = await deleteEntryImagesFromDirectory([entry]);
+    if (directoryDeleteFailed) {
+      showToast("已删除卡片，目录里可能留下未引用的旧图片。重新选择同一目录可重试同步。");
+    } else {
+      showToast("已删除卡片");
+    }
+  } catch (error) {
+    console.error(error);
+    showDirectorySyncFailure("删除目录同步数据");
+  } finally {
+    endLibraryMutation();
+  }
 }
 
 function getFilteredEntries() {
