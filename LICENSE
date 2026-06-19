@@ -1,21 +1,24 @@
-MIT License
+用图片保存tag 非商业署名许可
 
 Copyright (c) 2026 用图片保存tag contributors
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+本项目源码公开提供给个人学习、研究、备份、非商业使用和非商业修改。
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+在遵守以下条件的前提下，你可以复制、使用、修改和分发本项目：
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+1. 非商业使用
+   不得将本项目或其修改版本用于商业用途，包括但不限于销售、收费分发、作为付费产品或付费服务的一部分、用于商业运营、广告变现或其他以盈利为目的的场景。
+
+2. 保留出处
+   分发、转载、展示、修改或基于本项目制作衍生版本时，必须清楚注明原项目名称“用图片保存tag”，并保留本许可证文件。公开发布时还应附上原仓库链接。
+
+3. 修改说明
+   如果你修改了本项目并公开发布，应说明该版本已经过修改，避免让他人误认为是原始版本。
+
+4. 禁止移除限制
+   不得删除、隐藏或绕过本许可证中的非商业限制和署名要求。
+
+5. 无担保
+   本项目按“现状”提供，不提供任何明示或暗示的担保。作者和贡献者不对因使用、修改、分发或无法使用本项目而产生的任何损失、问题或责任负责。
+
+如需商业授权，请联系项目作者另行获得书面许可。
