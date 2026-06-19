@@ -13,6 +13,7 @@ const state = {
   customCategories: loadCustomCategories(),
   view: localStorage.getItem("galleryView") || "comfort",
   directoryHandle: null,
+  isDirectorySyncing: false,
   objectUrls: new Map(),
   isDraggingCard: false,
   blockCardDrag: false,
@@ -1710,28 +1711,65 @@ async function pickDirectory() {
     return;
   }
 
+  if (state.isDirectorySyncing) {
+    showToast("正在同步本地目录，请稍候");
+    return;
+  }
+
   try {
-    state.directoryHandle = await window.showDirectoryPicker({ mode: "readwrite" });
-    elements.storageStatus.textContent = "目录同步";
-    await syncAllToDirectory();
-    showToast("已连接本地目录");
+    const nextDirectoryHandle = await window.showDirectoryPicker({ mode: "readwrite" });
+    await migrateLibraryToDirectory(nextDirectoryHandle);
   } catch (error) {
     if (error.name !== "AbortError") {
+      console.error(error);
       showToast("目录连接失败");
     }
   }
 }
 
-async function syncAllToDirectory() {
-  for (const entry of state.entries) {
-    await syncEntryToDirectory(entry);
+async function migrateLibraryToDirectory(directoryHandle) {
+  const previousStatus = state.directoryHandle ? "目录同步" : "IndexedDB";
+  const total = state.entries.length;
+
+  state.isDirectorySyncing = true;
+  elements.pickFolderButton.disabled = true;
+  elements.storageStatus.textContent = total ? `迁移 0/${total}` : "目录同步";
+
+  try {
+    const result = await syncAllToDirectory(directoryHandle, (synced, count) => {
+      elements.storageStatus.textContent = `迁移 ${synced}/${count}`;
+    });
+    state.directoryHandle = directoryHandle;
+    elements.storageStatus.textContent = "目录同步";
+    showToast(total ? `已把 ${result.synced} 张图片迁移到新目录` : "已连接本地目录，之后导入会自动保存");
+  } catch (error) {
+    console.error(error);
+    elements.storageStatus.textContent = previousStatus;
+    showToast("迁移到本地目录失败，请确认目录可写");
+  } finally {
+    state.isDirectorySyncing = false;
+    elements.pickFolderButton.disabled = false;
   }
-  await writeDirectoryIndex();
 }
 
-async function syncEntryToDirectory(entry) {
-  if (!state.directoryHandle) return;
-  const imageDir = await state.directoryHandle.getDirectoryHandle("images", { create: true });
+async function syncAllToDirectory(directoryHandle = state.directoryHandle, onProgress) {
+  if (!directoryHandle) return { synced: 0 };
+
+  let synced = 0;
+  const total = state.entries.length;
+  for (const entry of state.entries) {
+    await syncEntryToDirectory(entry, directoryHandle);
+    synced += 1;
+    onProgress?.(synced, total);
+  }
+  await writeDirectoryIndex(directoryHandle);
+
+  return { synced };
+}
+
+async function syncEntryToDirectory(entry, directoryHandle = state.directoryHandle) {
+  if (!directoryHandle) return;
+  const imageDir = await directoryHandle.getDirectoryHandle("images", { create: true });
   const fileName = getDirectoryImageFileName(entry);
   const fileHandle = await imageDir.getFileHandle(fileName, { create: true });
   const writable = await fileHandle.createWritable();
@@ -1756,9 +1794,9 @@ async function deleteEntryImagesFromDirectory(entries) {
   await Promise.all(entries.map((entry) => deleteEntryImageFromDirectory(entry)));
 }
 
-async function writeDirectoryIndex() {
-  if (!state.directoryHandle) return;
-  const fileHandle = await state.directoryHandle.getFileHandle(INDEX_FILE, { create: true });
+async function writeDirectoryIndex(directoryHandle = state.directoryHandle) {
+  if (!directoryHandle) return;
+  const fileHandle = await directoryHandle.getFileHandle(INDEX_FILE, { create: true });
   const writable = await fileHandle.createWritable();
   await writable.write(JSON.stringify(toPortableData(), null, 2));
   await writable.close();
