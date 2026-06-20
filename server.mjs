@@ -1,9 +1,11 @@
 import { createServer } from "node:http";
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { extname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = fileURLToPath(new URL(".", import.meta.url));
+const appRoot = process.env.TAG_GALLERY_APP_ROOT ? resolve(process.env.TAG_GALLERY_APP_ROOT) : root;
+const shutdownFlag = resolve(appRoot, "shutdown-window.flag");
 const host = "127.0.0.1";
 const port = Number(process.env.PORT || 5188);
 
@@ -33,6 +35,28 @@ function getTargetPath(requestUrl) {
 }
 
 const server = createServer(async (request, response) => {
+  const url = new URL(request.url || "/", `http://${host}:${port}`);
+
+  if (request.method === "POST" && url.pathname === "/shutdown") {
+    try {
+      await writeFile(shutdownFlag, `${Date.now()}`, "utf8");
+    } catch {
+      // The browser can still close itself even if the monitor flag cannot be written.
+    }
+
+    response.writeHead(200, {
+      "Content-Type": "application/json; charset=utf-8",
+      "Cache-Control": "no-store",
+    });
+    response.end(JSON.stringify({ ok: true }));
+
+    setTimeout(() => {
+      server.close(() => process.exit(0));
+      setTimeout(() => process.exit(0), 700).unref();
+    }, 120).unref();
+    return;
+  }
+
   const target = getTargetPath(request.url || "/");
 
   if (!target) {
