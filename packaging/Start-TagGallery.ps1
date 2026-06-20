@@ -10,6 +10,7 @@ $PidFile = Join-Path $AppRoot "tag-gallery-server.pid"
 $WindowStateFile = Join-Path $AppRoot "window-state.json"
 $ShutdownFlagFile = Join-Path $AppRoot "shutdown-window.flag"
 $WindowMonitorScript = Join-Path $AppRoot "Monitor-TagGalleryWindow.ps1"
+$WindowTitleMarker = "TagGallery"
 $DefaultWindowWidth = if ($env:TAG_GALLERY_WINDOW_WIDTH) { [int]$env:TAG_GALLERY_WINDOW_WIDTH } else { 1410 }
 $DefaultWindowHeight = if ($env:TAG_GALLERY_WINDOW_HEIGHT) { [int]$env:TAG_GALLERY_WINDOW_HEIGHT } else { 760 }
 
@@ -108,6 +109,37 @@ function Wait-Server {
   return $false
 }
 
+function Test-ServerMatchesApp {
+  param([string]$UrlToTest)
+  try {
+    $response = Invoke-WebRequest -UseBasicParsing $UrlToTest -TimeoutSec 2
+    return $response.Content -like "*$WindowTitleMarker*"
+  } catch {
+    return $false
+  }
+}
+
+function Stop-RecordedServer {
+  if (!(Test-Path -LiteralPath $PidFile)) {
+    return
+  }
+
+  try {
+    $recordedPid = [int](Get-Content -LiteralPath $PidFile -Raw)
+    Stop-Process -Id $recordedPid -Force -ErrorAction SilentlyContinue
+  } catch {
+  }
+
+  Remove-Item -LiteralPath $PidFile -Force -ErrorAction SilentlyContinue
+
+  for ($i = 0; $i -lt 20; $i += 1) {
+    if (!(Test-PortOpen -PortToTest $Port)) {
+      break
+    }
+    Start-Sleep -Milliseconds 150
+  }
+}
+
 function Find-Browser {
   $candidates = @(
     "$env:ProgramFiles\Microsoft\Edge\Application\msedge.exe",
@@ -135,6 +167,10 @@ Remove-Item -LiteralPath $ShutdownFlagFile -Force -ErrorAction SilentlyContinue
 
 $NodeExe = if (Test-Path -LiteralPath $RuntimeNode) { $RuntimeNode } else { "node" }
 
+if ((Test-PortOpen -PortToTest $Port) -and !(Test-ServerMatchesApp -UrlToTest $Url)) {
+  Stop-RecordedServer
+}
+
 if (!(Test-PortOpen -PortToTest $Port)) {
   $env:PORT = "$Port"
   $env:TAG_GALLERY_APP_ROOT = $AppRoot
@@ -144,6 +180,24 @@ if (!(Test-PortOpen -PortToTest $Port)) {
   if (!(Wait-Server -PortToWait $Port)) {
     throw "用图片保存tag server did not start on $Url"
   }
+}
+
+if (Test-Path -LiteralPath $WindowMonitorScript) {
+  Start-Process -FilePath "powershell" -WindowStyle Hidden -ArgumentList @(
+    "-NoProfile",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-File",
+    $WindowMonitorScript,
+    "-StateFile",
+    $WindowStateFile,
+    "-Title",
+    $WindowTitleMarker,
+    "-DefaultWidth",
+    $DefaultWindowWidth,
+    "-DefaultHeight",
+    $DefaultWindowHeight
+  )
 }
 
 $browser = Find-Browser
@@ -161,22 +215,4 @@ if ($browser) {
   )
 } else {
   Start-Process $Url
-}
-
-if (Test-Path -LiteralPath $WindowMonitorScript) {
-  Start-Process -FilePath "powershell" -WindowStyle Hidden -ArgumentList @(
-    "-NoProfile",
-    "-ExecutionPolicy",
-    "Bypass",
-    "-File",
-    $WindowMonitorScript,
-    "-StateFile",
-    $WindowStateFile,
-    "-Title",
-    "用图片保存tag",
-    "-DefaultWidth",
-    $DefaultWindowWidth,
-    "-DefaultHeight",
-    $DefaultWindowHeight
-  )
 }

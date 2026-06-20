@@ -2,7 +2,7 @@ param(
   [Parameter(Mandatory = $true)]
   [string]$StateFile,
 
-  [string]$Title = "用图片保存tag",
+  [string]$Title = "TagGallery",
   [int]$DefaultWidth = 1410,
   [int]$DefaultHeight = 760
 )
