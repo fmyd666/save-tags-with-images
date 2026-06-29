@@ -35,6 +35,7 @@ const elements = {
   dropZone: document.querySelector("#dropZone"),
   pickFolderButton: document.querySelector("#pickFolderButton"),
   exportButton: document.querySelector("#exportButton"),
+  exitAppButton: document.querySelector("#exitAppButton"),
   clearButton: document.querySelector("#clearButton"),
   searchInput: document.querySelector("#searchInput"),
   newCategoryButton: document.querySelector("#newCategoryButton"),
@@ -142,6 +143,7 @@ function bindEvents() {
 
   elements.pickFolderButton.addEventListener("click", pickDirectory);
   elements.exportButton.addEventListener("click", exportIndex);
+  elements.exitAppButton.addEventListener("click", shutdownApp);
   elements.clearButton.addEventListener("click", clearLibrary);
   elements.closeDialogButton.addEventListener("click", () => elements.detailDialog.close());
   elements.closeImageViewerButton.addEventListener("click", closeImageViewer);
@@ -199,6 +201,29 @@ function bindEvents() {
       state.isDraggingCard = false;
     }, 0);
   });
+}
+
+async function shutdownApp() {
+  if (!window.confirm("退出软件？")) {
+    return;
+  }
+
+  elements.exitAppButton.disabled = true;
+  showToast("正在退出软件...");
+
+  try {
+    const response = await fetch("/shutdown", { method: "POST", cache: "no-store" });
+    if (!response.ok) {
+      throw new Error("shutdown failed");
+    }
+  } catch (error) {
+    console.warn(error);
+  } finally {
+    showToast("软件正在退出");
+    window.setTimeout(() => {
+      window.close();
+    }, 250);
+  }
 }
 
 async function createCategoryFromPrompt() {

@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>用图片保存tag</title>
+    <title>TagGallery - 用图片保存tag</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%230e7c6b'/%3E%3Cpath d='M18 42 30 22l8 12 5-7 6 15H18Z' fill='white'/%3E%3Ccircle cx='45' cy='19' r='5' fill='%23d9563a'/%3E%3C/svg%3E" />
     <link rel="stylesheet" href="./styles.css" />
   </head>
@@ -95,10 +95,18 @@
             <p class="eyeline">Tag Reference Archive</p>
             <h2>用图片保存tag</h2>
           </div>
-          <div class="stats" aria-label="统计">
-            <span><strong id="totalCount">0</strong> 张</span>
-            <span><strong id="visibleCount">0</strong> 显示</span>
-            <span><strong id="tagCount">0</strong> tags</span>
+          <div class="topbar-actions">
+            <div class="stats" aria-label="统计">
+              <span><strong id="totalCount">0</strong> 张</span>
+              <span><strong id="visibleCount">0</strong> 显示</span>
+              <span><strong id="tagCount">0</strong> tags</span>
+            </div>
+            <button id="exitAppButton" class="icon-button exit-app-button" type="button" title="退出软件" aria-label="退出软件">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M12 3v9" />
+                <path d="M18.4 6.6a8 8 0 1 1-12.8 0" />
+              </svg>
+            </button>
           </div>
         </header>
 

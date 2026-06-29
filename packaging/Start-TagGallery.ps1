@@ -8,7 +8,9 @@ $Port = if ($env:TAG_GALLERY_PORT) { [int]$env:TAG_GALLERY_PORT } else { 5188 }
 $Url = "http://127.0.0.1:$Port/"
 $PidFile = Join-Path $AppRoot "tag-gallery-server.pid"
 $WindowStateFile = Join-Path $AppRoot "window-state.json"
+$ShutdownFlagFile = Join-Path $AppRoot "shutdown-window.flag"
 $WindowMonitorScript = Join-Path $AppRoot "Monitor-TagGalleryWindow.ps1"
+$WindowTitleMarker = "TagGallery"
 $DefaultWindowWidth = if ($env:TAG_GALLERY_WINDOW_WIDTH) { [int]$env:TAG_GALLERY_WINDOW_WIDTH } else { 1410 }
 $DefaultWindowHeight = if ($env:TAG_GALLERY_WINDOW_HEIGHT) { [int]$env:TAG_GALLERY_WINDOW_HEIGHT } else { 760 }
 
@@ -26,6 +28,58 @@ function Get-DefaultWindowState {
     width = $width
     height = $height
   }
+}
+
+function Test-WindowStateUsable {
+  param($State)
+  if (!$State) {
+    return $false
+  }
+
+  return $State.width -ge 700 -and $State.height -ge 480
+}
+
+function Limit-WindowState {
+  param($State)
+  $default = Get-DefaultWindowState
+  if (!(Test-WindowStateUsable -State $State)) {
+    return $default
+  }
+
+  $width = [Math]::Max(700, [int]$State.width)
+  $height = [Math]::Max(480, [int]$State.height)
+  foreach ($screen in [System.Windows.Forms.Screen]::AllScreens) {
+    $area = $screen.WorkingArea
+    $hasHorizontalOverlap = ([int]$State.left -lt $area.Right) -and (([int]$State.left + $width) -gt $area.Left)
+    $hasVerticalOverlap = ([int]$State.top -lt $area.Bottom) -and (([int]$State.top + $height) -gt $area.Top)
+    if ($hasHorizontalOverlap -and $hasVerticalOverlap) {
+      return [pscustomobject]@{
+        left = [Math]::Min([Math]::Max([int]$State.left, $area.Left), [Math]::Max($area.Left, $area.Right - 80))
+        top = [Math]::Min([Math]::Max([int]$State.top, $area.Top), [Math]::Max($area.Top, $area.Bottom - 80))
+        width = [Math]::Min($width, [Math]::Max(700, $area.Width))
+        height = [Math]::Min($height, [Math]::Max(480, $area.Height))
+      }
+    }
+  }
+
+  return $default
+}
+
+function Get-SavedWindowState {
+  if (!(Test-Path -LiteralPath $WindowStateFile)) {
+    return $null
+  }
+
+  try {
+    $state = Get-Content -LiteralPath $WindowStateFile -Raw | ConvertFrom-Json
+    if (Test-WindowStateUsable -State $state) {
+      return Limit-WindowState -State $state
+    }
+  } catch {
+    return $null
+  }
+
+  return $null
 }
 
 function Test-PortOpen {
@@ -55,6 +109,37 @@ function Wait-Server {
   return $false
 }
 
+function Test-ServerMatchesApp {
+  param([string]$UrlToTest)
+  try {
+    $response = Invoke-WebRequest -UseBasicParsing $UrlToTest -TimeoutSec 2
+    return $response.Content -like "*$WindowTitleMarker*"
+  } catch {
+    return $false
+  }
+}
+
+function Stop-RecordedServer {
+  if (!(Test-Path -LiteralPath $PidFile)) {
+    return
+  }
+
+  try {
+    $recordedPid = [int](Get-Content -LiteralPath $PidFile -Raw)
+    Stop-Process -Id $recordedPid -Force -ErrorAction SilentlyContinue
+  } catch {
+  }
+
+  Remove-Item -LiteralPath $PidFile -Force -ErrorAction SilentlyContinue
+
+  for ($i = 0; $i -lt 20; $i += 1) {
+    if (!(Test-PortOpen -PortToTest $Port)) {
+      break
+    }
+    Start-Sleep -Milliseconds 150
+  }
+}
+
 function Find-Browser {
   $candidates = @(
     "$env:ProgramFiles\Microsoft\Edge\Application\msedge.exe",
@@ -78,31 +163,23 @@ if (!(Test-Path -LiteralPath $ServerScript)) {
   throw "Cannot find app server: $ServerScript"
 }
 
-Remove-Item -LiteralPath $WindowStateFile -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath $ShutdownFlagFile -Force -ErrorAction SilentlyContinue
 
 $NodeExe = if (Test-Path -LiteralPath $RuntimeNode) { $RuntimeNode } else { "node" }
 
+if ((Test-PortOpen -PortToTest $Port) -and !(Test-ServerMatchesApp -UrlToTest $Url)) {
+  Stop-RecordedServer
+}
+
 if (!(Test-PortOpen -PortToTest $Port)) {
   $env:PORT = "$Port"
+  $env:TAG_GALLERY_APP_ROOT = $AppRoot
   $server = Start-Process -FilePath $NodeExe -ArgumentList @($ServerScript) -WorkingDirectory $AppDir -WindowStyle Hidden -PassThru
   Set-Content -LiteralPath $PidFile -Value $server.Id -Encoding ASCII
 
   if (!(Wait-Server -PortToWait $Port)) {
     throw "用图片保存tag server did not start on $Url"
   }
-}
-
-$browser = Find-Browser
-if ($browser) {
-  $windowState = Get-DefaultWindowState
-  Start-Process -FilePath $browser -ArgumentList @(
-    "--app=$Url",
-    "--no-first-run",
-    "--window-size=$($windowState.width),$($windowState.height)",
-    "--window-position=$($windowState.left),$($windowState.top)"
-  )
-} else {
-  Start-Process $Url
 }
 
 if (Test-Path -LiteralPath $WindowMonitorScript) {
@@ -115,10 +192,27 @@ if (Test-Path -LiteralPath $WindowMonitorScript) {
     "-StateFile",
     $WindowStateFile,
     "-Title",
-    "用图片保存tag",
+    $WindowTitleMarker,
     "-DefaultWidth",
     $DefaultWindowWidth,
     "-DefaultHeight",
     $DefaultWindowHeight
   )
+}
+
+$browser = Find-Browser
+if ($browser) {
+  $windowState = Get-SavedWindowState
+  if (!$windowState) {
+    $windowState = Get-DefaultWindowState
+  }
+
+  Start-Process -FilePath $browser -ArgumentList @(
+    "--app=$Url",
+    "--no-first-run",
+    "--window-size=$($windowState.width),$($windowState.height)",
+    "--window-position=$($windowState.left),$($windowState.top)"
+  )
+} else {
+  Start-Process $Url
 }

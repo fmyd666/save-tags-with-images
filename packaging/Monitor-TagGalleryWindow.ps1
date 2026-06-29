@@ -2,9 +2,9 @@ param(
   [Parameter(Mandatory = $true)]
   [string]$StateFile,
 
-  [string]$Title = "ComfyUI",
+  [string]$Title = "TagGallery",
   [int]$DefaultWidth = 1410,
-  [int]$DefaultHeight = 805
+  [int]$DefaultHeight = 760
 )
 
 $ErrorActionPreference = "SilentlyContinue"
@@ -40,6 +40,9 @@ public static class WindowTools {
 
   [DllImport("user32.dll")]
   public static extern bool IsIconic(IntPtr hWnd);
+
+  [DllImport("user32.dll")]
+  public static extern bool PostMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
 
   public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
 
@@ -118,6 +121,36 @@ function Get-DefaultState {
   }
 }
 
+function Limit-WindowState {
+  param($State)
+  $default = Get-DefaultState
+  if (!(Test-StateUsable -State $State)) {
+    return $default
+  }
+
+  $width = [Math]::Max(700, [int]$State.width)
+  $height = [Math]::Max(480, [int]$State.height)
+  $screens = [System.Windows.Forms.Screen]::AllScreens
+
+  foreach ($screen in $screens) {
+    $area = $screen.WorkingArea
+    $hasHorizontalOverlap = ([int]$State.left -lt $area.Right) -and (([int]$State.left + $width) -gt $area.Left)
+    $hasVerticalOverlap = ([int]$State.top -lt $area.Bottom) -and (([int]$State.top + $height) -gt $area.Top)
+    if ($hasHorizontalOverlap -and $hasVerticalOverlap) {
+      $left = [Math]::Min([Math]::Max([int]$State.left, $area.Left), [Math]::Max($area.Left, $area.Right - 80))
+      $top = [Math]::Min([Math]::Max([int]$State.top, $area.Top), [Math]::Max($area.Top, $area.Bottom - 80))
+      return [pscustomobject]@{
+        left = $left
+        top = $top
+        width = [Math]::Min($width, [Math]::Max(700, $area.Width))
+        height = [Math]::Min($height, [Math]::Max(480, $area.Height))
+      }
+    }
+  }
+
+  return $default
+}
+
 function Test-StateUsable {
   param($State)
   if (!$State) {
@@ -176,14 +209,32 @@ if (!$window) {
 }
 
 $handle = $window
-$state = Get-DefaultState
+$state = Get-SavedState
+if (!$state) {
+  $state = Get-DefaultState
+}
+$state = Limit-WindowState -State $state
 
 Set-WindowState -Handle $handle -State $state
 
-for ($i = 0; $i -lt 8; $i += 1) {
+for ($i = 0; $i -lt 3; $i += 1) {
   if (![WindowTools]::IsWindow($handle)) {
     break
   }
   Set-WindowState -Handle $handle -State $state
   Start-Sleep -Milliseconds 200
+}
+
+$shutdownFile = Join-Path (Split-Path -Parent $StateFile) "shutdown-window.flag"
+
+while ([WindowTools]::IsWindow($handle)) {
+  if (Test-Path -LiteralPath $shutdownFile) {
+    Save-WindowState -Handle $handle
+    Remove-Item -LiteralPath $shutdownFile -Force
+    [void][WindowTools]::PostMessage($handle, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero)
+    break
+  }
+
+  Save-WindowState -Handle $handle
+  Start-Sleep -Milliseconds 800
 }

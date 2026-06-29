@@ -518,6 +518,14 @@ svg {
   justify-content: flex-end;
 }
 
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  min-width: 0;
+}
+
 .stats span {
   display: inline-flex;
   align-items: baseline;
@@ -535,6 +543,19 @@ svg {
 .stats strong {
   color: var(--ink);
   font-size: 18px;
+}
+
+.exit-app-button {
+  flex: 0 0 auto;
+  border-color: rgba(183, 68, 59, 0.25);
+  background: #fff7f6;
+  color: var(--warning);
+}
+
+.exit-app-button:hover,
+.exit-app-button:focus-visible {
+  border-color: rgba(183, 68, 59, 0.5);
+  box-shadow: 0 8px 22px rgba(183, 68, 59, 0.12);
 }
 
 .gallery-scroll {
@@ -1226,6 +1247,11 @@ svg {
 
   .stats {
     justify-content: flex-start;
+  }
+
+  .topbar-actions {
+    width: 100%;
+    justify-content: space-between;
   }
 
   .gallery {
