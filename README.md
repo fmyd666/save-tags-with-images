@@ -2,6 +2,7 @@
 
 ![用图片保存tag 软件截图](./docs/screenshot.png)
 
+![卡片详情：编辑 tag、备注、分类和查看完整 prompt](./docs/screenshot-detail.png)
 ![用图片保存tag 软件截图2](./docs/screenshot2.png)
 
 用图片保存tag 是一个纯本地图片 tag 收藏工具。它可以读取 ComfyUI 生成图片里的元数据，把你喜欢的正向 tag 保存成卡片，并用图片作为视觉参考。
