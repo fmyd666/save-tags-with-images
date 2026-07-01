@@ -8,7 +8,12 @@
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
-    <main class="app-shell">
+    <main id="appShell" class="app-shell">
+      <button id="sidebarToggle" class="sidebar-toggle" type="button" title="隐藏目录" aria-label="隐藏目录" aria-expanded="true">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M15 18l-6-6 6-6" />
+        </svg>
+      </button>
       <aside class="sidebar" aria-label="工具栏">
         <div class="brand">
           <span class="brand-mark" aria-hidden="true"></span>
@@ -85,7 +90,6 @@
             <button class="segment is-active" data-view="comfort" type="button">宽松</button>
             <button class="segment" data-view="compact" type="button">紧凑</button>
           </div>
-          <div id="tagCloud" class="tag-cloud" aria-label="常用标签"></div>
         </section>
       </aside>
 
@@ -101,6 +105,14 @@
               <span><strong id="visibleCount">0</strong> 显示</span>
               <span><strong id="tagCount">0</strong> tags</span>
             </div>
+            <button id="checkUpdateButton" class="icon-button update-button" type="button" title="检测 GitHub 更新" aria-label="检测 GitHub 更新">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M20 11a8 8 0 0 0-14.4-4.8L4 8" />
+                <path d="M4 4v4h4" />
+                <path d="M4 13a8 8 0 0 0 14.4 4.8L20 16" />
+                <path d="M20 20v-4h-4" />
+              </svg>
+            </button>
             <button id="exitAppButton" class="icon-button exit-app-button" type="button" title="退出软件" aria-label="退出软件">
               <svg viewBox="0 0 24 24" aria-hidden="true">
                 <path d="M12 3v9" />
@@ -155,6 +167,9 @@
       <div id="imageViewerContent" class="image-viewer-content"></div>
     </dialog>
 
+    <div id="dragOverlay" class="drag-overlay" aria-hidden="true">
+      <div>松开鼠标导入图片</div>
+    </div>
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
     <script src="./app.js" type="module"></script>
   </body>

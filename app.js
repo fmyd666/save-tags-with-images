@@ -2,19 +2,25 @@ const DB_NAME = "comfyui-local-gallery";
 const DB_VERSION = 1;
 const STORE_NAME = "images";
 const INDEX_FILE = "index.json";
-const PARSER_VERSION = 3;
+const PARSER_VERSION = 4;
+const SHUTDOWN_CLOSE_DELAY_MS = 650;
+const SEARCH_RENDER_DELAY_MS = 180;
+const GITHUB_REPOSITORY = "fmyd666/save-tags-with-images";
 
 const state = {
   db: null,
   entries: [],
   query: "",
-  activeTag: "",
   activeSection: "",
   customCategories: loadCustomCategories(),
   view: localStorage.getItem("galleryView") || "comfort",
   directoryHandle: null,
   isDirectorySyncing: false,
   isLibraryMutating: false,
+  isCheckingUpdate: false,
+  isSidebarCollapsed: localStorage.getItem("sidebarCollapsed") === "true",
+  searchRenderTimer: 0,
+  dragDepth: 0,
   objectUrls: new Map(),
   isDraggingCard: false,
   blockCardDrag: false,
@@ -31,16 +37,18 @@ const state = {
 };
 
 const elements = {
+  appShell: document.querySelector("#appShell"),
+  sidebarToggle: document.querySelector("#sidebarToggle"),
   fileInput: document.querySelector("#fileInput"),
   dropZone: document.querySelector("#dropZone"),
   pickFolderButton: document.querySelector("#pickFolderButton"),
   exportButton: document.querySelector("#exportButton"),
+  checkUpdateButton: document.querySelector("#checkUpdateButton"),
   exitAppButton: document.querySelector("#exitAppButton"),
   clearButton: document.querySelector("#clearButton"),
   searchInput: document.querySelector("#searchInput"),
   newCategoryButton: document.querySelector("#newCategoryButton"),
   sectionList: document.querySelector("#sectionList"),
-  tagCloud: document.querySelector("#tagCloud"),
   gallery: document.querySelector("#gallery"),
   emptyState: document.querySelector("#emptyState"),
   totalCount: document.querySelector("#totalCount"),
@@ -55,6 +63,7 @@ const elements = {
   imageViewerContent: document.querySelector("#imageViewerContent"),
   closeImageViewerButton: document.querySelector("#closeImageViewerButton"),
   downloadImageViewerButton: document.querySelector("#downloadImageViewerButton"),
+  dragOverlay: document.querySelector("#dragOverlay"),
   segments: [...document.querySelectorAll(".segment")],
 };
 
@@ -97,16 +106,23 @@ function endLibraryMutation() {
 }
 
 function showDirectorySyncFailure(context = "目录同步") {
-  showToast(`${context}失败，IndexedDB 数据已保留。目录可能已有部分文件，请重试同步。`);
+  showError(`${context}失败，IndexedDB 数据已保留。目录可能已有部分文件，请重试同步。`);
 }
 
 async function init() {
-  state.db = await openDatabase();
-  await loadEntries();
-  bindEvents();
-  applyViewMode();
-  render();
-  showToast("本地库已就绪");
+  try {
+    state.db = await openDatabase();
+    await loadEntries();
+    bindEvents();
+    applySidebarState();
+    applyViewMode();
+    render();
+    showToast("本地库已就绪");
+    checkForUpdates({ silent: true });
+  } catch (error) {
+    console.error(error);
+    showError("软件初始化失败，请刷新或重启后端窗口");
+  }
 }
 
 function bindEvents() {
@@ -115,34 +131,19 @@ function bindEvents() {
     elements.fileInput.value = "";
   });
 
-  ["dragenter", "dragover"].forEach((eventName) => {
-    elements.dropZone.addEventListener(eventName, (event) => {
-      event.preventDefault();
-      elements.dropZone.classList.add("is-dragging");
-    });
-  });
-
-  ["dragleave", "drop"].forEach((eventName) => {
-    elements.dropZone.addEventListener(eventName, (event) => {
-      event.preventDefault();
-      elements.dropZone.classList.remove("is-dragging");
-    });
-  });
-
-  elements.dropZone.addEventListener("drop", async (event) => {
-    await importFiles([...event.dataTransfer.files]);
-  });
+  bindWindowDropImport();
 
   elements.searchInput.addEventListener("input", (event) => {
     state.query = event.target.value.trim().toLowerCase();
-    state.activeTag = "";
-    render();
+    scheduleRender();
   });
 
   elements.newCategoryButton.addEventListener("click", createCategoryFromPrompt);
 
+  elements.sidebarToggle.addEventListener("click", toggleSidebar);
   elements.pickFolderButton.addEventListener("click", pickDirectory);
   elements.exportButton.addEventListener("click", exportIndex);
+  elements.checkUpdateButton.addEventListener("click", () => checkForUpdates({ silent: false }));
   elements.exitAppButton.addEventListener("click", shutdownApp);
   elements.clearButton.addEventListener("click", clearLibrary);
   elements.closeDialogButton.addEventListener("click", () => elements.detailDialog.close());
@@ -151,16 +152,12 @@ function bindEvents() {
   elements.imageViewerDialog.addEventListener("close", clearImageViewer);
   elements.dialogContent.addEventListener("click", handleDialogAction);
   elements.dialogContent.addEventListener("keydown", handleDialogKeydown);
+  window.addEventListener("keydown", handleGlobalKeydown);
   elements.imageViewerContent.addEventListener("wheel", handleImageViewerWheel, { passive: false });
   elements.imageViewerContent.addEventListener("pointerdown", handleImageViewerPointerDown);
   elements.imageViewerContent.addEventListener("pointermove", handleImageViewerPointerMove);
   elements.imageViewerContent.addEventListener("pointerup", handleImageViewerPointerEnd);
   elements.imageViewerContent.addEventListener("pointercancel", handleImageViewerPointerEnd);
-  elements.imageViewerContent.addEventListener("auxclick", (event) => {
-    if (event.button === 1) {
-      event.preventDefault();
-    }
-  });
   elements.imageViewerContent.addEventListener("dblclick", resetImageViewerTransform);
 
   elements.segments.forEach((button) => {
@@ -201,6 +198,112 @@ function bindEvents() {
       state.isDraggingCard = false;
     }, 0);
   });
+
+  window.addEventListener("error", (event) => {
+    console.error(event.error || event.message);
+    showError("软件运行出错，请查看后端日志窗口");
+  });
+
+  window.addEventListener("unhandledrejection", (event) => {
+    console.error(event.reason);
+    showError("操作失败，请稍后重试或查看后端日志窗口");
+  });
+}
+
+function bindWindowDropImport() {
+  const setDragging = (active) => {
+    elements.dropZone.classList.toggle("is-dragging", active);
+    elements.dragOverlay.classList.toggle("is-visible", active);
+  };
+
+  window.addEventListener("dragenter", (event) => {
+    if (!hasDraggedFiles(event)) return;
+    event.preventDefault();
+    state.dragDepth += 1;
+    setDragging(true);
+  });
+
+  window.addEventListener("dragover", (event) => {
+    if (!hasDraggedFiles(event)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+    setDragging(true);
+  });
+
+  window.addEventListener("dragleave", (event) => {
+    if (!hasDraggedFiles(event)) return;
+    event.preventDefault();
+    state.dragDepth = Math.max(0, state.dragDepth - 1);
+    if (state.dragDepth === 0) {
+      setDragging(false);
+    }
+  });
+
+  window.addEventListener("drop", async (event) => {
+    if (!hasDraggedFiles(event)) return;
+    event.preventDefault();
+    state.dragDepth = 0;
+    setDragging(false);
+    await importFiles([...event.dataTransfer.files]);
+  });
+}
+
+function hasDraggedFiles(event) {
+  return [...(event.dataTransfer?.types || [])].includes("Files");
+}
+
+function toggleSidebar() {
+  state.isSidebarCollapsed = !state.isSidebarCollapsed;
+  localStorage.setItem("sidebarCollapsed", `${state.isSidebarCollapsed}`);
+  applySidebarState();
+}
+
+function applySidebarState() {
+  elements.appShell.classList.toggle("is-sidebar-collapsed", state.isSidebarCollapsed);
+  elements.sidebarToggle.setAttribute("aria-expanded", `${!state.isSidebarCollapsed}`);
+  elements.sidebarToggle.setAttribute("aria-label", state.isSidebarCollapsed ? "显示目录" : "隐藏目录");
+  elements.sidebarToggle.title = state.isSidebarCollapsed ? "显示目录" : "隐藏目录";
+}
+
+async function getCurrentVersion() {
+  try {
+    const response = await fetch("/api/app-info", { cache: "no-store" });
+    if (!response.ok) return "0.0.0";
+    const info = await response.json();
+    return info.version || "0.0.0";
+  } catch {
+    return "0.0.0";
+  }
+}
+
+async function checkForUpdates({ silent = false } = {}) {
+  if (state.isCheckingUpdate) return;
+  state.isCheckingUpdate = true;
+  elements.checkUpdateButton.disabled = true;
+  try {
+    if (!silent) {
+      showToast("正在检测 GitHub 更新...");
+    }
+    const currentVersion = await getCurrentVersion();
+    const response = await fetch(`/api/update-check?repo=${encodeURIComponent(GITHUB_REPOSITORY)}&version=${encodeURIComponent(currentVersion)}`, { cache: "no-store" });
+    if (!response.ok) {
+      throw new Error("update check failed");
+    }
+    const result = await response.json();
+    if (result.hasUpdate) {
+      showToast(`发现新版本 ${result.latestVersion}，请到 GitHub Releases 下载`);
+      return;
+    }
+    if (!silent) {
+      showToast("当前已是最新版本");
+    }
+  } catch (error) {
+    console.warn(error);
+    showError("无法检测 GitHub 更新，请检查网络后重试");
+  } finally {
+    state.isCheckingUpdate = false;
+    elements.checkUpdateButton.disabled = false;
+  }
 }
 
 async function shutdownApp() {
@@ -222,7 +325,7 @@ async function shutdownApp() {
     showToast("软件正在退出");
     window.setTimeout(() => {
       window.close();
-    }, 250);
+    }, SHUTDOWN_CLOSE_DELAY_MS);
   }
 }
 
@@ -253,7 +356,7 @@ async function createCategoryFromPrompt() {
       } catch (error) {
         directoryFailed = true;
         console.error(error);
-        showToast("目录索引同步失败，分类已保存在本机。请确认目录可写后重新选择同一目录重试同步。");
+        showError("目录索引同步失败，分类已保存在本机。请确认目录可写后重新选择同一目录重试同步。");
       }
     }
 
@@ -344,6 +447,7 @@ async function importFiles(files) {
         const metadata = await readImageMetadata(file, buffer);
         const imageInfo = await readImageSize(file);
         const tags = buildTags(metadata);
+        const loraTags = extractLoraTagsFromTags(tags);
         const savedTags = pickInitialSavedTags(tags);
         const id = await hashFile(buffer, file.name, file.lastModified);
         const existingEntry = entriesById.get(id);
@@ -373,6 +477,7 @@ async function importFiles(files) {
           positivePrompt: metadata.positivePrompt,
           negativePrompt: metadata.negativePrompt,
           modelTags: metadata.modelTags,
+          loraTags,
           samplerTags: metadata.samplerTags,
           rawMetadata: metadata.raw,
           imageBuffer: buffer,
@@ -397,11 +502,11 @@ async function importFiles(files) {
         entriesById.set(id, entry);
       } catch (error) {
         console.error(error);
-        showToast(`${file.name} 导入失败：${error.message || "无法读取"}`);
+        showError(`${file.name} 导入失败：${error.message || "无法读取"}`);
       }
     }
 
-    await loadEntries();
+    state.entries = [...entriesById.values()].sort((a, b) => b.createdAt - a.createdAt);
     render();
     if (state.directoryHandle && !directoryFailed) {
       try {
@@ -459,6 +564,7 @@ async function migrateEntry(entry) {
   try {
     const metadata = await readImageMetadata({ name: normalizedEntry.name, type: normalizedEntry.type }, normalizedEntry.imageBuffer);
     const tags = buildTags(metadata);
+    const loraTags = extractLoraTagsFromTags(tags);
     const oldSavedTags = Array.isArray(normalizedEntry.savedTags) ? normalizedEntry.savedTags : [];
     const shouldRefreshSavedTags =
       !normalizedEntry.savedTagsEdited ||
@@ -474,6 +580,7 @@ async function migrateEntry(entry) {
       positivePrompt: metadata.positivePrompt,
       negativePrompt: metadata.negativePrompt,
       modelTags: metadata.modelTags,
+      loraTags,
       samplerTags: metadata.samplerTags,
       rawMetadata: metadata.raw,
     };
@@ -670,9 +777,7 @@ function normalizeMetadata(raw) {
     const nodeClass = String(node.class_type || node.type || "").toLowerCase();
     const linkedRole = getLinkedPromptRole(node, linkedRoles);
 
-    if (nodeClass.includes("checkpoint") || nodeClass.includes("lora") || nodeClass.includes("unet") || nodeClass.includes("vae")) {
-      collectModelFields(fields, modelTags);
-    }
+    collectModelFields(fields, modelTags);
 
     if (nodeClass.includes("ksampler") || title.includes("sampler")) {
       collectSamplerFields(fields, samplerTags);
@@ -864,11 +969,6 @@ function isMetadataLikeText(value) {
     lower.includes("loraworks") ||
     lower.includes("display_name")
   );
-}
-
-function collectNodes(promptJson, workflowJson) {
-  const promptNodes = collectPromptNodes(promptJson);
-  return promptNodes.length ? promptNodes : collectWorkflowNodes(workflowJson);
 }
 
 function collectPromptNodes(promptJson) {
@@ -1111,11 +1211,16 @@ function getNodeFields(node) {
   return {};
 }
 
+const MODEL_KEY_PATTERNS = ["ckpt", "model", "lora", "vae", "unet", "clip", "control_net", "controlnet", "upscale", "denoise"];
+const MODEL_FILE_EXTENSIONS = /\.(safetensors|ckpt|pt|pth|bin|gguf|sft)$/i;
+
 function collectModelFields(fields, modelTags) {
   for (const [key, value] of Object.entries(fields)) {
     if (typeof value !== "string") continue;
     const normalizedKey = key.toLowerCase();
-    if ((normalizedKey.includes("ckpt") || normalizedKey.includes("model") || normalizedKey.includes("lora") || normalizedKey.includes("vae")) && !isMetadataLikeText(value)) {
+    const isModelKey = MODEL_KEY_PATTERNS.some((pattern) => normalizedKey.includes(pattern));
+    const isModelValue = MODEL_FILE_EXTENSIONS.test(value);
+    if ((isModelKey || isModelValue) && !isMetadataLikeText(value)) {
       modelTags.add(cleanModelName(value));
     }
   }
@@ -1166,7 +1271,11 @@ function buildTags(metadata) {
   addTagsFromPrompt(metadata.negativePrompt, "negative", tagMap);
 
   for (const model of metadata.modelTags || []) {
-    addTag(tagMap, `model: ${model}`, "model");
+    if (isVaeName(model)) {
+      addTag(tagMap, `vae: ${model}`, "model");
+    } else {
+      addTag(tagMap, `model: ${model}`, "model");
+    }
   }
 
   for (const sampler of metadata.samplerTags || []) {
@@ -1277,6 +1386,64 @@ function normalizeFileNameStem(value) {
     .toLowerCase();
 }
 
+function getAutoModelLabels(entry) {
+  return uniqueText(entry.modelTags || [])
+    .filter((label) => !isLoraLabel(label) && !isVaeName(label))
+    .map(cleanModelName)
+    .filter(Boolean);
+}
+
+function getAutoVaeLabels(entry) {
+  return uniqueText(entry.modelTags || [])
+    .filter((label) => isVaeName(label))
+    .map(cleanModelName)
+    .filter(Boolean);
+}
+
+function getAutoLoraLabels(entry) {
+  return uniqueText([...(entry.loraTags || []), ...extractLoraTagsFromTags(entry.tags || [])])
+    .map(cleanModelName)
+    .filter(Boolean);
+}
+
+function extractLoraTagsFromTags(tags) {
+  return uniqueText(
+    (tags || [])
+      .map((tag) => String(tag?.label || tag || ""))
+      .filter(isLoraLabel)
+      .map((label) => label.replace(/^lora:\s*/i, "")),
+  );
+}
+
+function isLoraLabel(label) {
+  return String(label).trim().toLowerCase().startsWith("lora:");
+}
+
+function getEntryAutoCategoryTokens(entry) {
+  return [
+    ...getAutoModelLabels(entry).map((label) => createAutoCategoryToken("model", label)),
+    ...getAutoLoraLabels(entry).map((label) => createAutoCategoryToken("lora", label)),
+  ];
+}
+
+function createAutoCategoryToken(type, label) {
+  return `${type}:${normalizeCategoryLabel(label)}`;
+}
+
+function parseAutoCategoryToken(value) {
+  const text = String(value || "");
+  const match = text.match(/^(model|lora|vae):(.+)$/i);
+  if (!match) return null;
+  return { type: match[1].toLowerCase(), label: normalizeCategoryLabel(match[2]) };
+}
+
+function getAutoCategoryTitle(token) {
+  const parsed = parseAutoCategoryToken(token);
+  if (!parsed) return token;
+  const typeLabel = parsed.type === "model" ? "模型" : parsed.type === "lora" ? "Lora" : "VAE";
+  return `${typeLabel}: ${parsed.label}`;
+}
+
 function getEntryCategories(entry) {
   const fromCategories = Array.isArray(entry.categories) ? entry.categories : [];
   const fromSection = entry.section ? [entry.section] : [];
@@ -1303,6 +1470,18 @@ function getKnownCategories() {
 function isEntryInCategory(entry, category) {
   const active = normalizeCategoryLabel(category).toLowerCase();
   if (!active) return true;
+  const autoCategory = parseAutoCategoryToken(category);
+  if (autoCategory) {
+    const labels =
+      autoCategory.type === "model"
+        ? getAutoModelLabels(entry)
+        : autoCategory.type === "lora"
+          ? getAutoLoraLabels(entry)
+          : autoCategory.type === "vae"
+            ? getAutoVaeLabels(entry)
+            : [];
+    return labels.some((item) => item.toLowerCase() === autoCategory.label.toLowerCase());
+  }
   return getEntryCategories(entry).some((item) => item.toLowerCase() === active);
 }
 
@@ -1311,12 +1490,17 @@ function isUtilityTag(label) {
   return (
     lower.startsWith("model:") ||
     lower.startsWith("lora:") ||
+    lower.startsWith("vae:") ||
     lower.startsWith("sampler") ||
     lower.startsWith("scheduler") ||
     lower.startsWith("steps:") ||
     lower.startsWith("cfg:") ||
     lower.startsWith("seed:")
   );
+}
+
+function isVaeName(label) {
+  return String(label).toLowerCase().includes("vae");
 }
 
 function isLikelyNegativeOnlyTag(label) {
@@ -1445,7 +1629,8 @@ async function saveEditedTags(id) {
     saveCustomCategories();
     entry.note = String(noteInput?.value || "").trim();
     await saveEntry(entry);
-    await loadEntries();
+    const idx = state.entries.findIndex((item) => item.id === id);
+    if (idx !== -1) state.entries[idx] = entry;
     render();
     if (state.directoryHandle) {
       try {
@@ -1478,14 +1663,14 @@ async function copyText(text, successMessage) {
     await navigator.clipboard.writeText(text);
     showToast(successMessage);
   } catch {
-    showToast("复制失败，可手动选中文本复制");
+    showError("复制失败，可手动选中文本复制");
   }
 }
 
 function downloadOriginalImage(id) {
   const entry = state.entries.find((item) => item.id === id);
   if (!entry || !entry.imageBuffer) {
-    showToast("原图数据不存在");
+    showError("原图数据不存在");
     return;
   }
 
@@ -1515,6 +1700,7 @@ async function refreshSavedTagsFromMetadata(id) {
     let directoryFailed = false;
     const metadata = await readImageMetadata({ name: entry.name, type: entry.type }, entry.imageBuffer);
     const tags = buildTags(metadata);
+    const loraTags = extractLoraTagsFromTags(tags);
     entry.parserVersion = PARSER_VERSION;
     entry.tags = tags;
     entry.savedTags = pickInitialSavedTags(tags);
@@ -1522,11 +1708,13 @@ async function refreshSavedTagsFromMetadata(id) {
     entry.positivePrompt = metadata.positivePrompt;
     entry.negativePrompt = metadata.negativePrompt;
     entry.modelTags = metadata.modelTags;
+    entry.loraTags = loraTags;
     entry.samplerTags = metadata.samplerTags;
     entry.rawMetadata = metadata.raw;
 
     await saveEntry(entry);
-    await loadEntries();
+    const idx = state.entries.findIndex((item) => item.id === id);
+    if (idx !== -1) state.entries[idx] = entry;
     render();
     if (state.directoryHandle) {
       try {
@@ -1543,7 +1731,7 @@ async function refreshSavedTagsFromMetadata(id) {
     }
   } catch (error) {
     console.error(error);
-    showToast("重新生成失败，图片元数据可能已损坏");
+    showError("重新生成失败，图片元数据可能已损坏");
   } finally {
     endLibraryMutation();
   }
@@ -1594,7 +1782,7 @@ function handleCardDragStart(event) {
   } catch {
     event.preventDefault();
     state.isDraggingCard = false;
-    showToast("这个目标不支持直接拖入图片，可先导出或保存图片后再拖入");
+    showError("这个目标不支持直接拖入图片，可先导出或保存图片后再拖入");
   }
 }
 
@@ -1607,7 +1795,7 @@ function clearBlockedCardDrag() {
 }
 
 function isCardTextTarget(target) {
-  return Boolean(target.closest(".card-name-overlay, .overlay-tag, .overlay-empty"));
+  return Boolean(target.closest(".card-name-overlay, .image-tag-overlay"));
 }
 
 function openImageViewer(id) {
@@ -1640,6 +1828,38 @@ function closeImageViewer() {
   } else {
     clearImageViewer();
   }
+}
+
+function handleGlobalKeydown(event) {
+  if (!elements.imageViewerDialog.open) return;
+
+  if (event.key === "Escape") {
+    event.preventDefault();
+    closeImageViewer();
+    return;
+  }
+
+  if (event.key === "ArrowLeft") {
+    event.preventDefault();
+    openAdjacentImageViewer(-1);
+    return;
+  }
+
+  if (event.key === "ArrowRight") {
+    event.preventDefault();
+    openAdjacentImageViewer(1);
+  }
+}
+
+function openAdjacentImageViewer(direction) {
+  const entries = getFilteredEntries();
+  if (entries.length < 2) return;
+
+  const currentIndex = entries.findIndex((entry) => entry.id === state.viewer.entryId);
+  if (currentIndex === -1) return;
+
+  const nextIndex = (currentIndex + direction + entries.length) % entries.length;
+  openImageViewer(entries[nextIndex].id);
 }
 
 function clearImageViewer() {
@@ -1679,7 +1899,7 @@ function handleImageViewerWheel(event) {
 }
 
 function handleImageViewerPointerDown(event) {
-  if (!elements.imageViewerDialog.open || event.button !== 1) return;
+  if (!elements.imageViewerDialog.open || (event.button !== 0 && event.button !== 1)) return;
   event.preventDefault();
   state.viewer.isPanning = true;
   state.viewer.pointerId = event.pointerId;
@@ -1835,7 +2055,7 @@ function isSupportedImageFile(file) {
 
 async function pickDirectory() {
   if (!("showDirectoryPicker" in window)) {
-    showToast("当前浏览器不支持目录保存，可继续使用 IndexedDB 和导出索引");
+    showError("当前浏览器不支持目录保存，可继续使用 IndexedDB 和导出索引");
     return;
   }
 
@@ -1855,7 +2075,7 @@ async function pickDirectory() {
   } catch (error) {
     if (error.name !== "AbortError") {
       console.error(error);
-      showToast("目录连接失败");
+      showError("目录连接失败");
     }
   }
 }
@@ -1981,7 +2201,8 @@ function toPortableIndex(entries = state.entries) {
     savedTags: getDisplayTags(entry),
     positivePrompt: entry.positivePrompt,
     negativePrompt: entry.negativePrompt,
-    modelTags: entry.modelTags,
+    modelTags: getAutoModelLabels(entry),
+    loraTags: getAutoLoraLabels(entry),
     samplerTags: entry.samplerTags,
     rawMetadata: entry.rawMetadata,
   }));
@@ -2046,12 +2267,12 @@ async function clearLibrary() {
 
   try {
     const entriesToDelete = [...state.entries];
-    if (state.directoryHandle) {
-      await writeDirectoryIndex(state.directoryHandle, toPortableDataFromEntries([], state.customCategories));
-    }
     clearObjectUrls();
     await clearEntries();
     state.entries = [];
+    if (state.directoryHandle) {
+      await writeDirectoryIndex(state.directoryHandle, toPortableDataFromEntries([], state.customCategories));
+    }
     render();
     const directoryDeleteFailed = await deleteEntryImagesFromDirectory(entriesToDelete);
     if (directoryDeleteFailed) {
@@ -2078,12 +2299,12 @@ async function deleteEntry(id) {
 
   try {
     const nextEntries = state.entries.filter((item) => item.id !== id);
-    if (state.directoryHandle) {
-      await writeDirectoryIndex(state.directoryHandle, toPortableDataFromEntries(nextEntries, state.customCategories));
-    }
     clearObjectUrl(id);
     await removeEntry(id);
     state.entries = nextEntries;
+    if (state.directoryHandle) {
+      await writeDirectoryIndex(state.directoryHandle, toPortableDataFromEntries(nextEntries, state.customCategories));
+    }
     render();
     const directoryDeleteFailed = await deleteEntryImagesFromDirectory([entry]);
     if (directoryDeleteFailed) {
@@ -2101,7 +2322,6 @@ async function deleteEntry(id) {
 
 function getFilteredEntries() {
   const query = state.query;
-  const tag = state.activeTag.toLowerCase();
   const category = normalizeCategoryLabel(state.activeSection);
 
   return state.entries.filter((entry) => {
@@ -2110,6 +2330,9 @@ function getFilteredEntries() {
     const haystack = [
       ...positiveTags.map((item) => item.label),
       ...categories,
+      ...getAutoModelLabels(entry),
+      ...getAutoLoraLabels(entry),
+      ...getAutoVaeLabels(entry),
       getEntryDisplayName(entry),
       entry.note || "",
     ]
@@ -2117,32 +2340,9 @@ function getFilteredEntries() {
       .toLowerCase();
 
     const matchesQuery = !query || haystack.includes(query);
-    const matchesTag = !tag || positiveTags.some((item) => item.label.toLowerCase() === tag);
     const matchesCategory = isEntryInCategory(entry, category);
 
-    return matchesQuery && matchesTag && matchesCategory;
-  });
-}
-
-function getSearchAndTagFilteredEntries() {
-  const query = state.query;
-  const tag = state.activeTag.toLowerCase();
-
-  return state.entries.filter((entry) => {
-    const positiveTags = getPositiveDisplayTags(entry);
-    const categories = getEntryCategories(entry);
-    const haystack = [
-      ...positiveTags.map((item) => item.label),
-      ...categories,
-      getEntryDisplayName(entry),
-      entry.note || "",
-    ]
-      .join(" ")
-      .toLowerCase();
-
-    const matchesQuery = !query || haystack.includes(query);
-    const matchesTag = !tag || positiveTags.some((item) => item.label.toLowerCase() === tag);
-    return matchesQuery && matchesTag;
+    return matchesQuery && matchesCategory;
   });
 }
 
@@ -2150,8 +2350,12 @@ function render() {
   const filtered = getFilteredEntries();
   renderStats(filtered);
   renderSectionList();
-  renderTagCloud();
   renderGallery(filtered);
+}
+
+function scheduleRender() {
+  window.clearTimeout(state.searchRenderTimer);
+  state.searchRenderTimer = window.setTimeout(render, SEARCH_RENDER_DELAY_MS);
 }
 
 function renderStats(filtered) {
@@ -2160,35 +2364,6 @@ function renderStats(filtered) {
   elements.visibleCount.textContent = filtered.length;
   elements.tagCount.textContent = uniqueTags.size;
   elements.emptyState.classList.toggle("is-hidden", state.entries.length > 0);
-}
-
-function renderTagCloud() {
-  const counts = new Map();
-  for (const entry of state.entries) {
-    for (const tag of getPositiveDisplayTags(entry)) {
-      const key = tag.label.toLowerCase();
-      counts.set(key, { label: tag.label, count: (counts.get(key)?.count || 0) + 1 });
-    }
-  }
-
-  const tags = [...counts.values()].sort((a, b) => b.count - a.count || a.label.localeCompare(b.label)).slice(0, 28);
-
-  elements.tagCloud.replaceChildren(
-    ...tags.map((tag) => {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = `tag-chip${state.activeTag.toLowerCase() === tag.label.toLowerCase() ? " is-active" : ""}`;
-      button.textContent = `${tag.label} ${tag.count}`;
-      button.title = tag.label;
-      button.addEventListener("click", () => {
-        state.activeTag = state.activeTag.toLowerCase() === tag.label.toLowerCase() ? "" : tag.label;
-        elements.searchInput.value = "";
-        state.query = "";
-        render();
-      });
-      return button;
-    }),
-  );
 }
 
 function renderSectionList() {
@@ -2209,11 +2384,12 @@ function renderSectionList() {
     ...categories.map((category) =>
       createSectionButton({
         label: category.label,
-        path: category.label,
+        path: category.token || category.label,
+        type: category.type,
         count: category.count,
-        active: normalizeCategoryLabel(state.activeSection).toLowerCase() === category.label.toLowerCase(),
+        active: getActiveCategoryKey(state.activeSection) === getActiveCategoryKey(category.token || category.label),
         onClick: () => {
-          state.activeSection = category.label;
+          state.activeSection = category.token || category.label;
           render();
         },
       }),
@@ -2223,12 +2399,13 @@ function renderSectionList() {
 
 function buildCategoryList() {
   const categories = new Map();
-  const ensureCategory = (label) => {
+  const ensureCategory = (label, type = "category") => {
     const normalized = normalizeCategoryLabel(label);
     if (!normalized) return null;
-    const key = normalized.toLowerCase();
+    const token = type === "category" ? normalized : createAutoCategoryToken(type, normalized);
+    const key = getActiveCategoryKey(token);
     if (!categories.has(key)) {
-      categories.set(key, { label: normalized, count: 0 });
+      categories.set(key, { label: normalized, token, type, count: 0 });
     }
     return categories.get(key);
   };
@@ -2242,15 +2419,40 @@ function buildCategoryList() {
       const item = ensureCategory(category);
       if (item) item.count += 1;
     }
+    for (const model of getAutoModelLabels(entry)) {
+      const item = ensureCategory(model, "model");
+      if (item) item.count += 1;
+    }
+    for (const lora of getAutoLoraLabels(entry)) {
+      const item = ensureCategory(lora, "lora");
+      if (item) item.count += 1;
+    }
+    for (const vae of getAutoVaeLabels(entry)) {
+      const item = ensureCategory(vae, "vae");
+      if (item) item.count += 1;
+    }
   }
 
-  return [...categories.values()].sort((a, b) => b.count - a.count || a.label.localeCompare(b.label));
+  return [...categories.values()].sort((a, b) => getCategorySortRank(a.type) - getCategorySortRank(b.type) || b.count - a.count || a.label.localeCompare(b.label));
 }
 
-function createSectionButton({ label, path, count, active, onClick }) {
+function getCategorySortRank(type) {
+  return { category: 0, model: 1, lora: 2, vae: 3 }[type] ?? 4;
+}
+
+function getActiveCategoryKey(value) {
+  const autoCategory = parseAutoCategoryToken(value);
+  if (autoCategory) {
+    return `${autoCategory.type}:${autoCategory.label.toLowerCase()}`;
+  }
+  return normalizeCategoryLabel(value).toLowerCase();
+}
+
+function createSectionButton({ label, path, type = "category", count, active, onClick }) {
   const button = document.createElement("button");
   button.type = "button";
   button.className = `section-chip${active ? " is-active" : ""}`;
+  const typeLabel = type === "model" ? "模型" : type === "lora" ? "Lora" : type === "vae" ? "VAE" : "分类";
   button.innerHTML = `
     <span class="category-icon" aria-hidden="true">
       <svg viewBox="0 0 24 24">
@@ -2258,10 +2460,10 @@ function createSectionButton({ label, path, count, active, onClick }) {
         <path d="M4.6 4.6h6.8l8 8a2.2 2.2 0 0 1 0 3.1l-3.7 3.7a2.2 2.2 0 0 1-3.1 0l-8-8V4.6Z" />
       </svg>
     </span>
-    <span class="category-name">${escapeHtml(label)}</span>
+    <span class="category-name"><span class="category-type">${escapeHtml(typeLabel)}</span>${escapeHtml(label)}</span>
     <span class="category-count">${count}</span>
   `;
-  button.title = path || label;
+  button.title = path ? getAutoCategoryTitle(path) : label;
   button.addEventListener("click", onClick);
   return button;
 }
@@ -2316,6 +2518,9 @@ function openDetail(id) {
   const savedTags = getDisplayTags(entry);
   const categories = getKnownCategories();
   const displayName = getEntryDisplayName(entry);
+  const modelLabels = getAutoModelLabels(entry);
+  const loraLabels = getAutoLoraLabels(entry);
+  const vaeLabels = getAutoVaeLabels(entry);
   elements.dialogContent.innerHTML = `
     <div class="dialog-media">
       <img src="${objectUrl}" alt="${escapeHtml(entry.name)}" />
@@ -2399,6 +2604,9 @@ function openDetail(id) {
       <div class="detail-grid">
         <div class="detail-stat"><span>尺寸</span><strong>${entry.width || "-"} x ${entry.height || "-"}</strong></div>
         <div class="detail-stat"><span>大小</span><strong>${formatBytes(entry.size)}</strong></div>
+        <div class="detail-stat"><span>模型</span><strong>${escapeHtml(modelLabels.join(", ") || "未识别")}</strong></div>
+        <div class="detail-stat"><span>Lora</span><strong>${escapeHtml(loraLabels.join(", ") || "未识别")}</strong></div>
+        <div class="detail-stat"><span>VAE</span><strong>${escapeHtml(vaeLabels.join(", ") || "未识别")}</strong></div>
         <div class="detail-stat"><span>类型</span><strong>${escapeHtml(entry.type)}</strong></div>
         <div class="detail-stat"><span>导入时间</span><strong>${new Date(entry.importedAt).toLocaleString()}</strong></div>
       </div>
@@ -2485,11 +2693,16 @@ function escapeHtml(value) {
 }
 
 let toastTimer = 0;
-function showToast(message) {
+function showToast(message, { type = "info", duration = 3000 } = {}) {
   window.clearTimeout(toastTimer);
   elements.toast.textContent = message;
+  elements.toast.classList.toggle("is-error", type === "error");
   elements.toast.classList.add("is-visible");
   toastTimer = window.setTimeout(() => {
     elements.toast.classList.remove("is-visible");
-  }, 2400);
+  }, duration);
+}
+
+function showError(message) {
+  showToast(message, { type: "error", duration: 3000 });
 }

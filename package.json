@@ -1,6 +1,6 @@
 {
   "name": "save-tags-with-images",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "用图片保存tag：A local ComfyUI image metadata and tag reference gallery.",
   "license": "SEE LICENSE IN LICENSE",
   "type": "module",

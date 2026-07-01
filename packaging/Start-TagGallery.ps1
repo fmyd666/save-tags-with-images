@@ -2,6 +2,9 @@ $ErrorActionPreference = "Stop"
 
 $AppRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $AppDir = Join-Path $AppRoot "app"
+if (!(Test-Path -LiteralPath (Join-Path $AppDir "server.mjs"))) {
+  $AppDir = Split-Path -Parent $AppRoot
+}
 $RuntimeNode = Join-Path $AppRoot "runtime\node.exe"
 $ServerScript = Join-Path $AppDir "server.mjs"
 $Port = if ($env:TAG_GALLERY_PORT) { [int]$env:TAG_GALLERY_PORT } else { 5188 }
@@ -13,6 +16,8 @@ $WindowMonitorScript = Join-Path $AppRoot "Monitor-TagGalleryWindow.ps1"
 $WindowTitleMarker = "TagGallery"
 $DefaultWindowWidth = if ($env:TAG_GALLERY_WINDOW_WIDTH) { [int]$env:TAG_GALLERY_WINDOW_WIDTH } else { 1410 }
 $DefaultWindowHeight = if ($env:TAG_GALLERY_WINDOW_HEIGHT) { [int]$env:TAG_GALLERY_WINDOW_HEIGHT } else { 760 }
+$MinWindowWidth = 700
+$MinWindowHeight = 480
 
 function Get-DefaultWindowState {
   Add-Type -AssemblyName System.Windows.Forms
@@ -36,7 +41,7 @@ function Test-WindowStateUsable {
     return $false
   }
 
-  return $State.width -ge 700 -and $State.height -ge 480
+  return $State.width -ge $MinWindowWidth -and $State.height -ge $MinWindowHeight
 }
 
 function Limit-WindowState {
@@ -46,8 +51,8 @@ function Limit-WindowState {
     return $default
   }
 
-  $width = [Math]::Max(700, [int]$State.width)
-  $height = [Math]::Max(480, [int]$State.height)
+  $width = [Math]::Max($MinWindowWidth, [int]$State.width)
+  $height = [Math]::Max($MinWindowHeight, [int]$State.height)
   foreach ($screen in [System.Windows.Forms.Screen]::AllScreens) {
     $area = $screen.WorkingArea
     $hasHorizontalOverlap = ([int]$State.left -lt $area.Right) -and (([int]$State.left + $width) -gt $area.Left)
@@ -56,8 +61,8 @@ function Limit-WindowState {
       return [pscustomobject]@{
         left = [Math]::Min([Math]::Max([int]$State.left, $area.Left), [Math]::Max($area.Left, $area.Right - 80))
         top = [Math]::Min([Math]::Max([int]$State.top, $area.Top), [Math]::Max($area.Top, $area.Bottom - 80))
-        width = [Math]::Min($width, [Math]::Max(700, $area.Width))
-        height = [Math]::Min($height, [Math]::Max(480, $area.Height))
+        width = [Math]::Min($width, [Math]::Max($MinWindowWidth, $area.Width))
+        height = [Math]::Min($height, [Math]::Max($MinWindowHeight, $area.Height))
       }
     }
   }
@@ -119,6 +124,17 @@ function Test-ServerMatchesApp {
   }
 }
 
+function Wait-AppServer {
+  param([string]$UrlToWait)
+  for ($i = 0; $i -lt 40; $i += 1) {
+    if (Test-ServerMatchesApp -UrlToTest $UrlToWait) {
+      return $true
+    }
+    Start-Sleep -Milliseconds 200
+  }
+  return $false
+}
+
 function Stop-RecordedServer {
   if (!(Test-Path -LiteralPath $PidFile)) {
     return
@@ -167,18 +183,31 @@ Remove-Item -LiteralPath $ShutdownFlagFile -Force -ErrorAction SilentlyContinue
 
 $NodeExe = if (Test-Path -LiteralPath $RuntimeNode) { $RuntimeNode } else { "node" }
 
-if ((Test-PortOpen -PortToTest $Port) -and !(Test-ServerMatchesApp -UrlToTest $Url)) {
+$portOpen = Test-PortOpen -PortToTest $Port
+$serverMatchesApp = $portOpen -and (Test-ServerMatchesApp -UrlToTest $Url)
+
+if ($portOpen -and !$serverMatchesApp) {
   Stop-RecordedServer
+  $portOpen = Test-PortOpen -PortToTest $Port
+  $serverMatchesApp = $portOpen -and (Test-ServerMatchesApp -UrlToTest $Url)
+
+  if ($portOpen -and !$serverMatchesApp) {
+    throw "Port $Port is already in use by another server. Stop that process or set TAG_GALLERY_PORT."
+  }
 }
 
-if (!(Test-PortOpen -PortToTest $Port)) {
+if (!$serverMatchesApp) {
   $env:PORT = "$Port"
   $env:TAG_GALLERY_APP_ROOT = $AppRoot
-  $server = Start-Process -FilePath $NodeExe -ArgumentList @($ServerScript) -WorkingDirectory $AppDir -WindowStyle Hidden -PassThru
+  $server = Start-Process -FilePath $NodeExe -ArgumentList @($ServerScript) -WorkingDirectory $AppDir -WindowStyle Normal -PassThru
   Set-Content -LiteralPath $PidFile -Value $server.Id -Encoding ASCII
 
   if (!(Wait-Server -PortToWait $Port)) {
-    throw "用图片保存tag server did not start on $Url"
+    throw "TagGallery server did not open port $Port."
+  }
+
+  if (!(Wait-AppServer -UrlToWait $Url)) {
+    throw "TagGallery server did not respond with the expected app marker at $Url."
   }
 }
 
@@ -196,7 +225,11 @@ if (Test-Path -LiteralPath $WindowMonitorScript) {
     "-DefaultWidth",
     $DefaultWindowWidth,
     "-DefaultHeight",
-    $DefaultWindowHeight
+    $DefaultWindowHeight,
+    "-PollMilliseconds",
+    250,
+    "-PidFile",
+    $PidFile
   )
 }
 

@@ -4,10 +4,15 @@ param(
 
   [string]$Title = "TagGallery",
   [int]$DefaultWidth = 1410,
-  [int]$DefaultHeight = 760
+  [int]$DefaultHeight = 760,
+  [int]$PollMilliseconds = 250,
+  [string]$PidFile = ""
 )
 
 $ErrorActionPreference = "SilentlyContinue"
+$MinWindowWidth = 700
+$MinWindowHeight = 480
+$PollMilliseconds = [Math]::Max(100, $PollMilliseconds)
 
 Add-Type @"
 using System;
@@ -128,8 +133,8 @@ function Limit-WindowState {
     return $default
   }
 
-  $width = [Math]::Max(700, [int]$State.width)
-  $height = [Math]::Max(480, [int]$State.height)
+  $width = [Math]::Max($MinWindowWidth, [int]$State.width)
+  $height = [Math]::Max($MinWindowHeight, [int]$State.height)
   $screens = [System.Windows.Forms.Screen]::AllScreens
 
   foreach ($screen in $screens) {
@@ -142,8 +147,8 @@ function Limit-WindowState {
       return [pscustomobject]@{
         left = $left
         top = $top
-        width = [Math]::Min($width, [Math]::Max(700, $area.Width))
-        height = [Math]::Min($height, [Math]::Max(480, $area.Height))
+        width = [Math]::Min($width, [Math]::Max($MinWindowWidth, $area.Width))
+        height = [Math]::Min($height, [Math]::Max($MinWindowHeight, $area.Height))
       }
     }
   }
@@ -157,7 +162,7 @@ function Test-StateUsable {
     return $false
   }
 
-  return $State.width -ge 700 -and $State.height -ge 480
+  return $State.width -ge $MinWindowWidth -and $State.height -ge $MinWindowHeight
 }
 
 function Set-WindowState {
@@ -170,19 +175,25 @@ function Set-WindowState {
 function Save-WindowState {
   param([IntPtr]$Handle)
   if ([WindowTools]::IsIconic($Handle)) {
-    return
+    return $false
   }
 
   $rect = New-Object WindowTools+RECT
   if (![WindowTools]::GetWindowRect($Handle, [ref]$rect)) {
-    return
+    return $false
+  }
+
+  $width = $rect.Right - $rect.Left
+  $height = $rect.Bottom - $rect.Top
+  if ($width -lt $MinWindowWidth -or $height -lt $MinWindowHeight) {
+    return $false
   }
 
   $state = [pscustomobject]@{
     left = $rect.Left
     top = $rect.Top
-    width = $rect.Right - $rect.Left
-    height = $rect.Bottom - $rect.Top
+    width = $width
+    height = $height
     updatedAt = (Get-Date).ToString("o")
   }
 
@@ -191,6 +202,23 @@ function Save-WindowState {
     New-Item -ItemType Directory -Path $dir -Force | Out-Null
   }
   $state | ConvertTo-Json | Set-Content -LiteralPath $StateFile -Encoding UTF8
+  return $true
+}
+
+function Stop-Backend {
+  param([IntPtr]$Handle)
+  $shutdownFile = Join-Path (Split-Path -Parent $StateFile) "shutdown-window.flag"
+  [void](Save-WindowState -Handle $Handle)
+  New-Item -ItemType File -Path $shutdownFile -Force | Out-Null
+
+  if ($PidFile -and (Test-Path -LiteralPath $PidFile)) {
+    $pidText = Get-Content -LiteralPath $PidFile -Raw
+    $serverPid = 0
+    if ([int]::TryParse($pidText.Trim(), [ref]$serverPid)) {
+      Stop-Process -Id $serverPid -Force -ErrorAction SilentlyContinue
+    }
+    Remove-Item -LiteralPath $PidFile -Force -ErrorAction SilentlyContinue
+  }
 }
 
 Add-Type -AssemblyName System.Windows.Forms
@@ -227,14 +255,20 @@ for ($i = 0; $i -lt 3; $i += 1) {
 
 $shutdownFile = Join-Path (Split-Path -Parent $StateFile) "shutdown-window.flag"
 
+$requestedShutdown = $false
 while ([WindowTools]::IsWindow($handle)) {
   if (Test-Path -LiteralPath $shutdownFile) {
-    Save-WindowState -Handle $handle
+    $requestedShutdown = $true
+    [void](Save-WindowState -Handle $handle)
     Remove-Item -LiteralPath $shutdownFile -Force
     [void][WindowTools]::PostMessage($handle, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero)
     break
   }
 
-  Save-WindowState -Handle $handle
-  Start-Sleep -Milliseconds 800
+  [void](Save-WindowState -Handle $handle)
+  Start-Sleep -Milliseconds $PollMilliseconds
+}
+
+if (!$requestedShutdown) {
+  Stop-Backend -Handle $handle
 }
