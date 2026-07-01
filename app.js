@@ -1271,11 +1271,7 @@ function buildTags(metadata) {
   addTagsFromPrompt(metadata.negativePrompt, "negative", tagMap);
 
   for (const model of metadata.modelTags || []) {
-    if (isVaeName(model)) {
-      addTag(tagMap, `vae: ${model}`, "model");
-    } else {
-      addTag(tagMap, `model: ${model}`, "model");
-    }
+    addTag(tagMap, `model: ${model}`, "model");
   }
 
   for (const sampler of metadata.samplerTags || []) {
@@ -1388,14 +1384,7 @@ function normalizeFileNameStem(value) {
 
 function getAutoModelLabels(entry) {
   return uniqueText(entry.modelTags || [])
-    .filter((label) => !isLoraLabel(label) && !isVaeName(label))
-    .map(cleanModelName)
-    .filter(Boolean);
-}
-
-function getAutoVaeLabels(entry) {
-  return uniqueText(entry.modelTags || [])
-    .filter((label) => isVaeName(label))
+    .filter((label) => !isLoraLabel(label))
     .map(cleanModelName)
     .filter(Boolean);
 }
@@ -1432,7 +1421,7 @@ function createAutoCategoryToken(type, label) {
 
 function parseAutoCategoryToken(value) {
   const text = String(value || "");
-  const match = text.match(/^(model|lora|vae):(.+)$/i);
+  const match = text.match(/^(model|lora):(.+)$/i);
   if (!match) return null;
   return { type: match[1].toLowerCase(), label: normalizeCategoryLabel(match[2]) };
 }
@@ -1440,7 +1429,7 @@ function parseAutoCategoryToken(value) {
 function getAutoCategoryTitle(token) {
   const parsed = parseAutoCategoryToken(token);
   if (!parsed) return token;
-  const typeLabel = parsed.type === "model" ? "模型" : parsed.type === "lora" ? "Lora" : "VAE";
+  const typeLabel = parsed.type === "model" ? "模型" : "Lora";
   return `${typeLabel}: ${parsed.label}`;
 }
 
@@ -1477,9 +1466,7 @@ function isEntryInCategory(entry, category) {
         ? getAutoModelLabels(entry)
         : autoCategory.type === "lora"
           ? getAutoLoraLabels(entry)
-          : autoCategory.type === "vae"
-            ? getAutoVaeLabels(entry)
-            : [];
+          : [];
     return labels.some((item) => item.toLowerCase() === autoCategory.label.toLowerCase());
   }
   return getEntryCategories(entry).some((item) => item.toLowerCase() === active);
@@ -1490,17 +1477,12 @@ function isUtilityTag(label) {
   return (
     lower.startsWith("model:") ||
     lower.startsWith("lora:") ||
-    lower.startsWith("vae:") ||
     lower.startsWith("sampler") ||
     lower.startsWith("scheduler") ||
     lower.startsWith("steps:") ||
     lower.startsWith("cfg:") ||
     lower.startsWith("seed:")
   );
-}
-
-function isVaeName(label) {
-  return String(label).toLowerCase().includes("vae");
 }
 
 function isLikelyNegativeOnlyTag(label) {
@@ -2332,7 +2314,6 @@ function getFilteredEntries() {
       ...categories,
       ...getAutoModelLabels(entry),
       ...getAutoLoraLabels(entry),
-      ...getAutoVaeLabels(entry),
       getEntryDisplayName(entry),
       entry.note || "",
     ]
@@ -2427,17 +2408,13 @@ function buildCategoryList() {
       const item = ensureCategory(lora, "lora");
       if (item) item.count += 1;
     }
-    for (const vae of getAutoVaeLabels(entry)) {
-      const item = ensureCategory(vae, "vae");
-      if (item) item.count += 1;
-    }
   }
 
   return [...categories.values()].sort((a, b) => getCategorySortRank(a.type) - getCategorySortRank(b.type) || b.count - a.count || a.label.localeCompare(b.label));
 }
 
 function getCategorySortRank(type) {
-  return { category: 0, model: 1, lora: 2, vae: 3 }[type] ?? 4;
+  return { category: 0, model: 1, lora: 2 }[type] ?? 3;
 }
 
 function getActiveCategoryKey(value) {
@@ -2452,7 +2429,7 @@ function createSectionButton({ label, path, type = "category", count, active, on
   const button = document.createElement("button");
   button.type = "button";
   button.className = `section-chip${active ? " is-active" : ""}`;
-  const typeLabel = type === "model" ? "模型" : type === "lora" ? "Lora" : type === "vae" ? "VAE" : "分类";
+  const typeLabel = type === "model" ? "模型" : type === "lora" ? "Lora" : "分类";
   button.innerHTML = `
     <span class="category-icon" aria-hidden="true">
       <svg viewBox="0 0 24 24">
@@ -2520,7 +2497,6 @@ function openDetail(id) {
   const displayName = getEntryDisplayName(entry);
   const modelLabels = getAutoModelLabels(entry);
   const loraLabels = getAutoLoraLabels(entry);
-  const vaeLabels = getAutoVaeLabels(entry);
   elements.dialogContent.innerHTML = `
     <div class="dialog-media">
       <img src="${objectUrl}" alt="${escapeHtml(entry.name)}" />
@@ -2606,7 +2582,6 @@ function openDetail(id) {
         <div class="detail-stat"><span>大小</span><strong>${formatBytes(entry.size)}</strong></div>
         <div class="detail-stat"><span>模型</span><strong>${escapeHtml(modelLabels.join(", ") || "未识别")}</strong></div>
         <div class="detail-stat"><span>Lora</span><strong>${escapeHtml(loraLabels.join(", ") || "未识别")}</strong></div>
-        <div class="detail-stat"><span>VAE</span><strong>${escapeHtml(vaeLabels.join(", ") || "未识别")}</strong></div>
         <div class="detail-stat"><span>类型</span><strong>${escapeHtml(entry.type)}</strong></div>
         <div class="detail-stat"><span>导入时间</span><strong>${new Date(entry.importedAt).toLocaleString()}</strong></div>
       </div>
