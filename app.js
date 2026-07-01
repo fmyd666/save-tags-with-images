@@ -1993,7 +1993,7 @@ function parseMaybeJson(value) {
 }
 
 function cleanModelName(value) {
-  return String(value).replace(/\.(safetensors|ckpt|pt|pth|bin)$/i, "").trim();
+  return String(value).replace(/\.(safetensors|ckpt|pt|pth|bin|gguf|sft)$/i, "").trim();
 }
 
 function readImageSize(file) {
